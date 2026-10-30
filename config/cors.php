@@ -12,9 +12,9 @@ return [
     'allowed_methods' => ['*'],
 
     'allowed_origins' => [
-        //'http://localhost:9000',
-        //'http://127.0.0.1:9000',
-        'https://sicam-sti.onrender.com',   // ← frontend no Render
+        'http://localhost:9000',
+        'http://127.0.0.1:9000',
+        'https://sicam-sti.onrender.com',
     ],
 
     'allowed_origins_patterns' => [],
@@ -25,5 +25,5 @@ return [
 
     'max_age' => 0,
 
-    'supports_credentials' => true,   // ⭐ OBRIGATÓRIO para cookies
+    'supports_credentials' => true,
 ];

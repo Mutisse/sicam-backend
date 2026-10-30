@@ -50,5 +50,5 @@ COPY nginx.conf /etc/nginx/conf.d/default.conf
 # ─── Expor porta ───
 EXPOSE 80
 
-# ─── Comando de inicialização ───
-CMD ["sh", "-c", "php-fpm & nginx -g 'daemon off;'"]
+# ─── Limpar cache de config e iniciar php-fpm + nginx ───
+CMD ["sh", "-c", "php artisan config:clear && php-fpm & nginx -g 'daemon off;'"]
