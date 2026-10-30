@@ -44,12 +44,13 @@ RUN composer install --no-dev --optimize-autoloader --no-interaction
 # ─── Permissões ───
 RUN chown -R www-data:www-data /var/www/html/storage /var/www/html/bootstrap/cache
 
-# ─── Configurar Nginx (remover default e usar o customizado) ───
+# ─── Configurar Nginx (remover defaults e usar o customizado) ───
 RUN rm -f /etc/nginx/conf.d/default.conf
+RUN rm -f /etc/nginx/sites-enabled/default
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 
 # ─── Expor porta ───
 EXPOSE 80
 
 # ─── Limpar cache de config e iniciar php-fpm + nginx ───
-CMD ["sh", "-c", "php artisan config:clear && php-fpm & nginx -g 'daemon off;'"]
+CMD ["sh", "-c", "php artisan config:clear; php-fpm & nginx -g 'daemon off;'"]
