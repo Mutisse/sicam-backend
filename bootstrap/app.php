@@ -16,12 +16,11 @@ return Application::configure(basePath: dirname(__DIR__))
         // Não redirecionar para route('login') — devolver 401
         $middleware->redirectGuestsTo(fn () => null);
 
-        // Sanctum SPA (frontend em localhost:9000)
+        // Sanctum SPA — já inclui o EnsureFrontendRequestsAreStateful
         $middleware->statefulApi();
 
         // Middleware de monitorização (medir latência de todas as requests API)
         $middleware->api(prepend: [
-            \Laravel\Sanctum\Http\Middleware\EnsureFrontendRequestsAreStateful::class,
             \App\Http\Middleware\MonitorLatency::class,
         ]);
     })
