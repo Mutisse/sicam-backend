@@ -16,8 +16,7 @@ return Application::configure(basePath: dirname(__DIR__))
         // Não redirecionar para route('login') — devolver 401
         $middleware->redirectGuestsTo(fn () => null);
 
-        // Sanctum SPA — já inclui o EnsureFrontendRequestsAreStateful
-        $middleware->statefulApi();
+        // ⭐ statefulApi REMOVIDO — estamos a usar Bearer token, não cookies SPA
 
         // Middleware de monitorização (medir latência de todas as requests API)
         $middleware->api(prepend: [
