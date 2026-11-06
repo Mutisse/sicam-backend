@@ -27,24 +27,20 @@ class AgenteConsultaController extends Controller
 
         if (!$veiculo) {
             return response()->json([
-                'matricula' => $matricula,
+                'matricula'  => $matricula,
                 'encontrado' => false,
-                'score' => null,
-                'tipo' => null,
-                'posto' => null,
-                'entidades' => [],
+                'score'      => null,
+                'tipo'       => null,
+                'posto'      => null,
+                'entidades'  => [],
             ]);
         }
 
         $score = (int) ($veiculo->score ?? 0);
-
-        // Determina o "tipo" a partir da marca/modelo
-        $tipo = $this->tipoVeiculo($veiculo);
-
-        // Posto — da hotlist ou do veículo
+        $tipo  = $this->tipoVeiculo($veiculo);
         $posto = $this->postoDoVeiculo($veiculo, $user);
 
-        // Entidades — cada uma é verificada em tabela real
+        // Entidades — 1 query por tabela (batch)
         $entidades = $this->verificarEntidades($veiculo);
 
         // Regista no histórico do agente (Cache)
@@ -63,12 +59,11 @@ class AgenteConsultaController extends Controller
     // ============================================================
     // Helpers
     // ============================================================
+
     private function tipoVeiculo(Veiculo $v): string
     {
-        // 1. Coluna `tipo` do próprio veículo
         if (!empty($v->tipo)) return $v->tipo;
 
-        // 2. Procura no catálogo
         if (!empty($v->marca) && !empty($v->modelo)) {
             $cat = \App\Models\VeiculoCatalogo::query()
                 ->whereRaw('LOWER(marca) = ?', [mb_strtolower($v->marca)])
@@ -78,32 +73,31 @@ class AgenteConsultaController extends Controller
             if ($cat) return $cat->tipo_veiculo;
         }
 
-        // 3. Fallback razoável
         return 'Ligeiro';
     }
 
     private function postoDoVeiculo(Veiculo $v, $user): string
     {
-        // Se o veículo tem posto_id → vai buscar o nome
         if ($v->posto_id) {
             $posto = DB::table('postos')->find($v->posto_id);
             if ($posto) return $posto->nome;
         }
 
-        // Senão, usa a hotlist
         $hot = DB::table('hotlist')
             ->where('veiculo_id', $v->id)
             ->where('estado', 'Activo')
             ->first();
         if ($hot) return $hot->posto ?? $hot->zona ?? '—';
 
-        // Senão, usa o posto do user
         return $user->posto ?? '—';
     }
 
+    /**
+     * Verifica as 4 entidades — 1 query por entidade (batch, não N+1).
+     */
     private function verificarEntidades(Veiculo $v): array
     {
-        // 1. INATRO — inspecção
+        // 1. INATRO — inspecção válida
         $temInspecaoValida = false;
         if (DB::getSchemaBuilder()->hasTable('inspecoes')) {
             $ultima = DB::table('inspecoes')
@@ -129,7 +123,7 @@ class AgenteConsultaController extends Controller
             $temSeguro = $apolice && Carbon::parse($apolice->validade)->isFuture();
         }
 
-        // 4. PRM — hotlist
+        // 4. PRM — hotlist activa
         $naHotlist = DB::table('hotlist')
             ->where('veiculo_id', $v->id)
             ->where('estado', 'Activo')
@@ -176,10 +170,9 @@ class AgenteConsultaController extends Controller
         $chave = "agente:{$user->id}:ultimas_consultas";
         $historico = Cache::get($chave, []);
 
-        // Remove duplicado se já existir
         $historico = array_values(array_filter(
             $historico,
-            fn($h) => ($h['matricula'] ?? '') !== $matricula,
+            fn ($h) => ($h['matricula'] ?? '') !== $matricula,
         ));
 
         array_unshift($historico, [
@@ -221,21 +214,22 @@ class AgenteConsultaController extends Controller
             ], 404);
         }
 
-        // Score + tipo (usa catálogo)
         $score = (int) ($veiculo->score ?? 0);
         $tipo  = $this->tipoVeiculo($veiculo);
 
+        // ═══════════════════════════════════════════════════════
         // Proprietário — do veículo + apólice mais recente
+        // ═══════════════════════════════════════════════════════
         $apoliceRecente = DB::table('apolices')
             ->where('veiculo_id', $veiculo->id)
             ->orderByDesc('validade')
             ->first();
 
         $proprietario = [
-            'nome'      => $veiculo->proprietario_nome ?? ($apoliceRecente->segurado ?? '—'),
-            'numeroId'  => $veiculo->proprietario_numero_id ?? ($apoliceRecente->nif ?? '—'),
-            'contacto'  => $apoliceRecente->telefone ?? '—',
-            'email'     => $apoliceRecente->email ?? '—',
+            'nome'     => $veiculo->proprietario_nome ?? ($apoliceRecente->segurado ?? '—'),
+            'numeroId' => $veiculo->proprietario_numero_id ?? ($apoliceRecente->nif ?? '—'),
+            'contacto' => $apoliceRecente->telefone ?? '—',
+            'email'    => $apoliceRecente->email ?? '—',
         ];
 
         // Inspecções
@@ -246,15 +240,15 @@ class AgenteConsultaController extends Controller
             ->map(function ($i) {
                 $validade = $i->validade ? Carbon::parse($i->validade) : null;
                 return [
-                    'codigo'        => $i->codigo,
-                    'data'          => $i->data ? Carbon::parse($i->data)->format('d/m/Y') : '—',
-                    'validade'      => $validade ? $validade->format('d/m/Y') : '—',
-                    'proxima'       => $i->proxima_inspecao ? Carbon::parse($i->proxima_inspecao)->format('d/m/Y') : '—',
-                    'resultado'     => $i->resultado ?? '—',
-                    'estado'        => $i->estado ?? '—',
-                    'inspetor'      => $i->inspetor ?? '—',
-                    'observacoes'   => $i->observacoes,
-                    'valida'        => $validade ? $validade->isFuture() : false,
+                    'codigo'      => $i->codigo,
+                    'data'        => $i->data ? Carbon::parse($i->data)->format('d/m/Y') : '—',
+                    'validade'    => $validade ? $validade->format('d/m/Y') : '—',
+                    'proxima'     => $i->proxima_inspecao ? Carbon::parse($i->proxima_inspecao)->format('d/m/Y') : '—',
+                    'resultado'   => $i->resultado ?? '—',
+                    'estado'      => $i->estado ?? '—',
+                    'inspetor'    => $i->inspetor ?? '—',
+                    'observacoes' => $i->observacoes,
+                    'valida'      => $validade ? $validade->isFuture() : false,
                 ];
             });
 
@@ -288,20 +282,20 @@ class AgenteConsultaController extends Controller
         $multasPagas     = $multasTodas->where('estado', 'Paga');
 
         $multas = [
-            'pendentes'      => $multasPendentes->count(),
-            'pagas'          => $multasPagas->count(),
-            'total'          => $multasTodas->count(),
-            'valorTotal'     => (float) $multasTodas->sum('valor'),
-            'valorPendente'  => (float) $multasPendentes->sum('valor'),
-            'lista'          => $multasTodas->map(function ($m) {
+            'pendentes'     => $multasPendentes->count(),
+            'pagas'         => $multasPagas->count(),
+            'total'         => $multasTodas->count(),
+            'valorTotal'    => (float) $multasTodas->sum('valor'),
+            'valorPendente' => (float) $multasPendentes->sum('valor'),
+            'lista'         => $multasTodas->map(function ($m) {
                 return [
-                    'numero'         => $m->numero,
-                    'infracao'       => $m->infracao ?? '—',
-                    'valor'          => (float) ($m->valor ?? 0),
-                    'data'           => $m->data ? Carbon::parse($m->data)->format('d/m/Y') : '—',
-                    'dataPagamento'  => $m->data_pagamento ? Carbon::parse($m->data_pagamento)->format('d/m/Y') : null,
-                    'estado'         => $m->estado,
-                    'provincia'      => $m->provincia,
+                    'numero'        => $m->numero,
+                    'infracao'      => $m->infracao ?? '—',
+                    'valor'         => (float) ($m->valor ?? 0),
+                    'data'          => $m->data ? Carbon::parse($m->data)->format('d/m/Y') : '—',
+                    'dataPagamento' => $m->data_pagamento ? Carbon::parse($m->data_pagamento)->format('d/m/Y') : null,
+                    'estado'        => $m->estado,
+                    'provincia'     => $m->provincia,
                 ];
             })->values(),
         ];
@@ -313,15 +307,15 @@ class AgenteConsultaController extends Controller
             ->first();
 
         $hotlist = $hot ? [
-            'activo'       => $hot->estado === 'Activo',
-            'motivo'       => $hot->motivo ?? '—',
-            'perigo'       => $hot->perigo ?? '—',
-            'prioridade'   => $hot->prioridade ?? '—',
-            'posto'        => $hot->posto ?? '—',
-            'zona'         => $hot->zona ?? '—',
-            'descricao'    => $hot->descricao ?? '—',
-            'detectadoEm'  => $hot->detectado_em ? Carbon::parse($hot->detectado_em)->format('d/m/Y') : '—',
-            'estado'       => $hot->estado,
+            'activo'      => $hot->estado === 'Activo',
+            'motivo'      => $hot->motivo ?? '—',
+            'perigo'      => $hot->perigo ?? '—',
+            'prioridade'  => $hot->prioridade ?? '—',
+            'posto'       => $hot->posto ?? '—',
+            'zona'        => $hot->zona ?? '—',
+            'descricao'   => $hot->descricao ?? '—',
+            'detectadoEm' => $hot->detectado_em ? Carbon::parse($hot->detectado_em)->format('d/m/Y') : '—',
+            'estado'      => $hot->estado,
         ] : null;
 
         // Resumo — 4 entidades
@@ -366,27 +360,27 @@ class AgenteConsultaController extends Controller
         ];
 
         return response()->json([
-            'encontrado'    => true,
-            'veiculo'       => [
-                'id'           => (string) $veiculo->id,
-                'matricula'    => $veiculo->matricula,
-                'marca'        => $veiculo->marca ?? '—',
-                'modelo'       => $veiculo->modelo ?? '—',
-                'ano'          => $veiculo->ano,
-                'cor'          => $veiculo->cor ?? '—',
-                'chassis'      => $veiculo->chassis ?? '—',
-                'combustivel'  => $veiculo->combustivel ?? '—',
-                'tipo'         => $tipo,
-                'provincia'    => $veiculo->provincia ?? '—',
-                'score'        => $score,
-                'estado'       => $veiculo->estado ?? '—',
+            'encontrado'   => true,
+            'veiculo'      => [
+                'id'          => (string) $veiculo->id,
+                'matricula'   => $veiculo->matricula,
+                'marca'       => $veiculo->marca ?? '—',
+                'modelo'      => $veiculo->modelo ?? '—',
+                'ano'         => $veiculo->ano,
+                'cor'         => $veiculo->cor ?? '—',
+                'chassis'     => $veiculo->chassis ?? '—',
+                'combustivel' => $veiculo->combustivel ?? '—',
+                'tipo'        => $tipo,
+                'provincia'   => $veiculo->provincia ?? '—',
+                'score'       => $score,
+                'estado'      => $veiculo->estado ?? '—',
             ],
-            'proprietario'  => $proprietario,
-            'inspecoes'     => $inspecoes,
-            'apolices'      => $apolices,
-            'multas'        => $multas,
-            'hotlist'       => $hotlist,
-            'resumo'        => [
+            'proprietario' => $proprietario,
+            'inspecoes'    => $inspecoes,
+            'apolices'     => $apolices,
+            'multas'       => $multas,
+            'hotlist'      => $hotlist,
+            'resumo'       => [
                 'score'     => $score,
                 'estado'    => $veiculo->estado ?? '—',
                 'entidades' => $entidades,

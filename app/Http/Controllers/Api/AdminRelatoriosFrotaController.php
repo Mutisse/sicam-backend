@@ -15,34 +15,12 @@ class AdminRelatoriosFrotaController extends Controller
 {
     /**
      * GET /api/admin/relatorios/frota
-     * Query: de, ate, viatura, estado
      */
     public function index(Request $request)
     {
-        $de  = $request->filled('de')
-            ? Carbon::parse($request->de)->startOfDay()
-            : Carbon::today()->subDays(30);
+        $dados = $this->dados($request);
 
-        $ate = $request->filled('ate')
-            ? Carbon::parse($request->ate)->endOfDay()
-            : Carbon::today();
-
-        $filtroViatura = $request->input('viatura', '');
-        $filtroEstado  = $request->input('estado', '');
-
-        return response()->json([
-            'periodo' => [
-                'de'  => $de->format('Y-m-d'),
-                'ate' => $ate->format('Y-m-d'),
-            ],
-            'kpis'      => $this->kpis($de, $ate, $filtroViatura),
-            'viaturas'  => $this->viaturas($de, $ate),
-            'operacoes' => $this->operacoes($de, $ate, $filtroViatura, $filtroEstado),
-            'opcoes'    => [
-                'viaturas' => $this->opcoesViaturas(),
-                'estados'  => ['Planeada', 'Em curso', 'Concluída', 'Cancelada'],
-            ],
-        ]);
+        return response()->json($dados);
     }
 
     /**
@@ -50,7 +28,7 @@ class AdminRelatoriosFrotaController extends Controller
      */
     public function xlsx(Request $request)
     {
-        $dados = $this->index($request)->getData(true);
+        $dados = $this->dados($request);
 
         $cabecalhos = ['Viatura', 'Operações', 'GPS', 'Odómetro', 'Variação'];
         $linhas = collect($dados['viaturas'])->map(fn ($v) => [
@@ -72,7 +50,7 @@ class AdminRelatoriosFrotaController extends Controller
      */
     public function pdf(Request $request)
     {
-        $dados = $this->index($request)->getData(true);
+        $dados = $this->dados($request);
 
         $cabecalhos = ['Viatura', 'Operações', 'GPS', 'Odómetro', 'Variação'];
         $linhas = collect($dados['viaturas'])->map(fn ($v) => [
@@ -104,6 +82,37 @@ class AdminRelatoriosFrotaController extends Controller
     }
 
     // ============================================================
+    // Núcleo — calcula os dados uma vez para todos os métodos
+    // ============================================================
+    private function dados(Request $request): array
+    {
+        $de  = $request->filled('de')
+            ? Carbon::parse($request->de)->startOfDay()
+            : Carbon::today()->subDays(30);
+
+        $ate = $request->filled('ate')
+            ? Carbon::parse($request->ate)->endOfDay()
+            : Carbon::today();
+
+        $filtroViatura = $request->input('viatura', '');
+        $filtroEstado  = $request->input('estado', '');
+
+        return [
+            'periodo' => [
+                'de'  => $de->format('Y-m-d'),
+                'ate' => $ate->format('Y-m-d'),
+            ],
+            'kpis'      => $this->kpis($de, $ate, $filtroViatura),
+            'viaturas'  => $this->viaturas($de, $ate),
+            'operacoes' => $this->operacoes($de, $ate, $filtroViatura, $filtroEstado),
+            'opcoes'    => [
+                'viaturas' => $this->opcoesViaturas(),
+                'estados'  => ['Planeada', 'Em curso', 'Concluída', 'Cancelada'],
+            ],
+        ];
+    }
+
+    // ============================================================
     // Helpers
     // ============================================================
 
@@ -116,28 +125,36 @@ class AdminRelatoriosFrotaController extends Controller
             $query->where('viatura', $filtroViatura);
         }
 
-        $total      = (clone $query)->count();
-        $concluidas = (clone $query)->where('estado', 'Concluída')->count();
+        // ⭐ 2 queries (total + concluidas) em vez de 3
+        $row = (clone $query)
+            ->selectRaw("
+                COUNT(*) as total,
+                SUM(CASE WHEN estado = 'Concluída' THEN 1 ELSE 0 END) as concluidas
+            ")
+            ->first();
+
+        $total      = (int) $row->total;
+        $concluidas = (int) $row->concluidas;
         $taxa       = $total > 0 ? round(($concluidas / $total) * 100, 1) : 0;
 
         return [
-            'operacoes'      => $total,
-            'concluidas'     => $concluidas,
-            'taxaConclusao'  => $taxa . '%',
-            'noPrazo'        => $taxa . '%', // mesmo valor por agora
-            'distancia'      => '0', // não temos distância real
-            'duracao'        => '0', // não temos duração real
+            'operacoes'     => $total,
+            'concluidas'    => $concluidas,
+            'taxaConclusao' => $taxa . '%',
+            'noPrazo'       => '—',  // sem dados reais
+            'distancia'     => '—',  // sem dados reais
+            'duracao'       => '—',  // sem dados reais
         ];
     }
 
     private function viaturas(Carbon $de, Carbon $ate): array
     {
-        // Viaturas distintas em patrulhas no período
+        // ⭐ Aspas simples no CASE (não duplas)
         $viaturas = DB::table('patrulhas')
             ->select(
                 'viatura',
                 DB::raw('COUNT(*) as total'),
-                DB::raw('SUM(CASE WHEN estado = "Concluída" THEN 1 ELSE 0 END) as concluidas')
+                DB::raw("SUM(CASE WHEN estado = 'Concluída' THEN 1 ELSE 0 END) as concluidas")
             )
             ->whereBetween('created_at', [$de, $ate])
             ->whereNotNull('viatura')
@@ -146,19 +163,15 @@ class AdminRelatoriosFrotaController extends Controller
             ->orderByDesc('total')
             ->get();
 
-        return $viaturas->map(function ($v) {
-            // Sem GPS/odómetro reais, mostramos apenas operações
-            // "anomalia" = false (não temos dados para calcular)
-            return [
-                'viatura'     => $v->viatura,
-                'operacoes'   => "{$v->concluidas}/{$v->total}",
-                'gps'         => '—',
-                'odometro'    => '—',
-                'variacao'    => '—',
-                'variacaoNum' => 0,
-                'anomalia'    => false,
-            ];
-        })->toArray();
+        return $viaturas->map(fn ($v) => [
+            'viatura'     => $v->viatura,
+            'operacoes'   => "{$v->concluidas}/{$v->total}",
+            'gps'         => '—',
+            'odometro'    => '—',
+            'variacao'    => '—',
+            'variacaoNum' => 0,
+            'anomalia'    => false,
+        ])->toArray();
     }
 
     private function operacoes(
@@ -191,7 +204,10 @@ class AdminRelatoriosFrotaController extends Controller
             ->limit(300)
             ->get()
             ->map(function ($p) {
-                $inicio = $p->inicio ? Carbon::parse($p->inicio)->format('d/m H:i') : '—';
+                $inicio = $p->inicio
+                    ? Carbon::parse($p->inicio)->format('d/m H:i')
+                    : '—';
+
                 return [
                     'codigo'      => $p->codigo,
                     'tipo'        => $p->turno ?? '—',

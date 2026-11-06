@@ -1,10 +1,13 @@
 <?php
+// app/Http/Controllers/Api/AgenteAutoController.php
 
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\AutoNoticia;
+use App\Models\Veiculo;
 use App\Services\GeminiService;
+use App\Services\NotificacaoService;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -20,7 +23,7 @@ class AgenteAutoController extends Controller
 
     public function index(Request $request)
     {
-        $eu = auth()->user();
+        $eu = $request->user();
         $hoje = Carbon::today();
 
         $items = AutoNoticia::query()
@@ -32,9 +35,9 @@ class AgenteAutoController extends Controller
             ->map(fn ($a) => $this->formatar($a));
 
         return response()->json([
-            'items'      => $items,
-            'totalHoje'  => $items->count(),
-            'infracoes'  => config('infracoes'),
+            'items'     => $items,
+            'totalHoje' => $items->count(),
+            'infracoes' => config('infracoes'),
         ]);
     }
 
@@ -54,9 +57,8 @@ class AgenteAutoController extends Controller
             return response()->json(['message' => 'Infracção inválida.'], 422);
         }
 
-        $eu = auth()->user();
+        $eu = $request->user();
 
-        // 1. Guardar na BD
         $auto = DB::transaction(function () use ($dados, $infracao, $eu) {
             $codigo = $this->gerarCodigo();
 
@@ -75,7 +77,6 @@ class AgenteAutoController extends Controller
             ]);
         });
 
-        // 2. Chamar a IA DIRETAMENTE (sem try/catch para ver o erro real)
         $textoGerado = $this->geminiService->gerarTextoAuto([
             'matricula'       => $auto->matricula,
             'infracao_codigo' => $auto->infracao_codigo,
@@ -86,33 +87,80 @@ class AgenteAutoController extends Controller
             'observacoes'     => $auto->observacoes,
         ]);
 
-        // 3. Devolver resposta
+        // ═══════════════════════════════════════════════════════
+        // 🔔 GATILHO — Multa emitida
+        //    1. Tenta notificar o cidadão proprietário (pelo NIF)
+        //    2. Se não existir conta, notifica gestores (gestmul/admin)
+        // ═══════════════════════════════════════════════════════
+        $matricula   = $auto->matricula;
+        $infracaoLbl = $auto->infracao_label;
+        $valor       = (float) $auto->valor;
+        $codigoAuto  = $auto->codigo;
+
+        dispatch(function () use ($matricula, $infracaoLbl, $valor, $codigoAuto) {
+            $veiculo = Veiculo::where('matricula', $matricula)->first();
+            $nif = $veiculo?->proprietario_numero_id;
+
+            // 1. Cidadão proprietário (pelo NIF)
+            $userCidadao = $nif
+                ? \App\Models\User::where('nif', $nif)->first()
+                : null;
+
+            if ($userCidadao) {
+                \App\Models\Notificacao::criarMultiplas(
+                    [$userCidadao->id],
+                    'Nova multa no seu veículo',
+                    "Foi emitida a multa {$codigoAuto} por {$infracaoLbl} no veículo {$matricula}. Valor: " . number_format($valor, 2, ',', '.') . ' MT.',
+                    'critico',
+                    'multa',
+                    $matricula
+                );
+                return;
+            }
+
+            // 2. Fallback — gestores de multas e admins
+            $destinatarios = \App\Models\User::whereHas('perfil', function ($q) {
+                $q->whereIn('key', ['gestmul', 'admin']);
+            })->pluck('id')->toArray();
+
+            if (!empty($destinatarios)) {
+                \App\Models\Notificacao::criarMultiplas(
+                    $destinatarios,
+                    'Nova multa emitida (proprietário sem conta)',
+                    "Multa {$codigoAuto} por {$infracaoLbl} no veículo {$matricula} (proprietário: {$veiculo?->proprietario_nome}). Valor: " . number_format($valor, 2, ',', '.') . ' MT.',
+                    'critico',
+                    'multa',
+                    $matricula
+                );
+            }
+        })->afterResponse();
+
         return response()->json([
-            'auto'   => $this->formatar($auto),
-            'texto'  => $textoGerado, 
+            'auto'  => $this->formatar($auto),
+            'texto' => $textoGerado,
         ], 201);
     }
 
-    public function show(int $id)
+    public function show(Request $request, int $id)
     {
-        $eu = auth()->user();
+        $eu = $request->user();
         $auto = AutoNoticia::where('agente_id', $eu->id)->findOrFail($id);
 
         return response()->json([
             'auto'  => $this->formatar($auto),
-            'texto' => $auto->observacoes, // Devolve o que foi gerado na altura
+            'texto' => $auto->observacoes,
         ]);
     }
 
-    public function imprimir(int $id)
+    public function imprimir(Request $request, int $id)
     {
-        $eu = auth()->user();
+        $eu = $request->user();
         $auto = AutoNoticia::where('agente_id', $eu->id)->findOrFail($id);
 
         $auto->update(['estado' => 'Impresso']);
 
         return response()->json([
-            'auto' => $this->formatar($auto->fresh()),
+            'auto' => $this->formatar($auto),
         ]);
     }
 

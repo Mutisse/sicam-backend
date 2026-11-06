@@ -13,6 +13,9 @@ use Maatwebsite\Excel\Facades\Excel;
 
 class IssmSinistroController extends Controller
 {
+    /**
+     * GET /api/issm/sinistros
+     */
     public function index(Request $request)
     {
         $query = Sinistro::query()->with('apolice:id,numero');
@@ -43,36 +46,51 @@ class IssmSinistroController extends Controller
         ]);
     }
 
+    /**
+     * GET /api/issm/sinistros/{id}
+     */
     public function show(int $id)
     {
         $s = Sinistro::with('apolice:id,numero')->findOrFail($id);
         return response()->json($this->formatar($s));
     }
 
+    /**
+     * POST /api/issm/sinistros
+     */
     public function store(Request $request)
     {
         $dados = $request->validate([
-            'numero'         => 'required|string|max:40|unique:sinistros,numero',
-            'matricula'      => 'required|string|max:20',
-            'apolice'        => 'nullable|string|max:40',
-            'segurado'       => 'required|string|max:120',
-            'seguradora'     => 'required|string|max:120',
-            'tipo'           => 'required|string|in:Colisão,Furto,Incêndio,Inundação,Vandalismo',
-            'gravidade'      => 'required|string|in:Leve,Moderado,Grave',
-            'data'           => 'required|string',
-            'local'          => 'required|string|max:200',
-            'descricao'      => 'required|string',
-            'valorEstimado'  => 'required|integer|min:0',
-            'valorAprovado'  => 'nullable|integer|min:0',
-            'estado'         => 'nullable|string|in:Aberto,Em análise,Resolvido,Recusado',
-            'responsavel'    => 'required|string|max:120',
-            'observacoes'    => 'nullable|string',
+            'numero'        => 'required|string|max:40|unique:sinistros,numero',
+            'matricula'     => 'required|string|max:20',
+            'apolice'       => 'nullable|string|max:40',
+            'segurado'      => 'required|string|max:120',
+            'seguradora'    => 'required|string|max:120',
+            'tipo'          => 'required|string|in:Colisão,Furto,Incêndio,Inundação,Vandalismo',
+            'gravidade'     => 'required|string|in:Leve,Moderado,Grave',
+            'data'          => 'required|date',
+            'local'         => 'required|string|max:200',
+            'descricao'     => 'required|string',
+            'valorEstimado' => 'required|numeric|min:0',
+            'valorAprovado' => 'nullable|numeric|min:0',
+            'estado'        => 'nullable|string|in:Aberto,Em análise,Resolvido,Recusado',
+            'responsavel'   => 'required|string|max:120',
+            'observacoes'   => 'nullable|string',
         ]);
 
-        // Tentar encontrar apólice pelo número
+        // Apólice — se enviada, tem de existir
         $apoliceId = null;
         if (!empty($dados['apolice'])) {
             $apoliceId = Apolice::where('numero', $dados['apolice'])->value('id');
+            if (!$apoliceId) {
+                return response()->json(['message' => 'Apólice não encontrada.'], 422);
+            }
+        }
+
+        // Data — parse tolerante
+        $data = $this->parseData($dados['data']);
+        if (!$data) {
+            return response()->json(['message' => 'Data inválida.'], 422);
         }
 
         $s = Sinistro::create([
@@ -83,7 +101,7 @@ class IssmSinistroController extends Controller
             'seguradora'     => $dados['seguradora'],
             'tipo'           => $dados['tipo'],
             'gravidade'      => $dados['gravidade'],
-            'data'           => $this->parseData($dados['data']),
+            'data'           => $data,
             'local'          => $dados['local'],
             'descricao'      => $dados['descricao'],
             'valor_estimado' => $dados['valorEstimado'],
@@ -94,60 +112,86 @@ class IssmSinistroController extends Controller
             'criado_por'     => $request->user()?->id,
         ]);
 
+        $s->load('apolice:id,numero');
+
         return response()->json([
             'id'       => (string) $s->id,
-            'sinistro' => $this->formatar($s->fresh('apolice')),
+            'sinistro' => $this->formatar($s),
         ], 201);
     }
 
+    /**
+     * PUT /api/issm/sinistros/{id}
+     */
     public function update(Request $request, int $id)
     {
         $s = Sinistro::findOrFail($id);
 
         $dados = $request->validate([
-            'matricula'      => 'sometimes|string|max:20',
-            'apolice'        => 'nullable|string|max:40',
-            'segurado'       => 'sometimes|string|max:120',
-            'seguradora'     => 'sometimes|string|max:120',
-            'tipo'           => 'sometimes|string|in:Colisão,Furto,Incêndio,Inundação,Vandalismo',
-            'gravidade'      => 'sometimes|string|in:Leve,Moderado,Grave',
-            'data'           => 'sometimes|string',
-            'local'          => 'sometimes|string|max:200',
-            'descricao'      => 'sometimes|string',
-            'valorEstimado'  => 'sometimes|integer|min:0',
-            'valorAprovado'  => 'nullable|integer|min:0',
-            'estado'         => 'sometimes|string|in:Aberto,Em análise,Resolvido,Recusado',
-            'responsavel'    => 'sometimes|string|max:120',
-            'observacoes'    => 'nullable|string',
+            'matricula'     => 'sometimes|string|max:20',
+            'apolice'       => 'nullable|string|max:40',
+            'segurado'      => 'sometimes|string|max:120',
+            'seguradora'    => 'sometimes|string|max:120',
+            'tipo'          => 'sometimes|string|in:Colisão,Furto,Incêndio,Inundação,Vandalismo',
+            'gravidade'     => 'sometimes|string|in:Leve,Moderado,Grave',
+            'data'          => 'sometimes|date',
+            'local'         => 'sometimes|string|max:200',
+            'descricao'     => 'sometimes|string',
+            'valorEstimado' => 'sometimes|numeric|min:0',
+            'valorAprovado' => 'nullable|numeric|min:0',
+            'estado'        => 'sometimes|string|in:Aberto,Em análise,Resolvido,Recusado',
+            'responsavel'   => 'sometimes|string|max:120',
+            'observacoes'   => 'nullable|string',
         ]);
 
         $update = [];
-        if (isset($dados['matricula']))      $update['matricula']      = strtoupper($dados['matricula']);
-        if (isset($dados['segurado']))       $update['segurado']       = $dados['segurado'];
-        if (isset($dados['seguradora']))     $update['seguradora']     = $dados['seguradora'];
-        if (isset($dados['tipo']))           $update['tipo']           = $dados['tipo'];
-        if (isset($dados['gravidade']))      $update['gravidade']      = $dados['gravidade'];
-        if (isset($dados['data']))           $update['data']           = $this->parseData($dados['data']);
-        if (isset($dados['local']))          $update['local']          = $dados['local'];
-        if (isset($dados['descricao']))      $update['descricao']      = $dados['descricao'];
-        if (isset($dados['valorEstimado']))  $update['valor_estimado'] = $dados['valorEstimado'];
+        if (isset($dados['matricula']))     $update['matricula']      = strtoupper($dados['matricula']);
+        if (isset($dados['segurado']))      $update['segurado']       = $dados['segurado'];
+        if (isset($dados['seguradora']))    $update['seguradora']     = $dados['seguradora'];
+        if (isset($dados['tipo']))          $update['tipo']           = $dados['tipo'];
+        if (isset($dados['gravidade']))     $update['gravidade']      = $dados['gravidade'];
+        if (isset($dados['local']))         $update['local']          = $dados['local'];
+        if (isset($dados['descricao']))     $update['descricao']      = $dados['descricao'];
+        if (isset($dados['valorEstimado'])) $update['valor_estimado'] = $dados['valorEstimado'];
         if (array_key_exists('valorAprovado', $dados)) $update['valor_aprovado'] = $dados['valorAprovado'];
-        if (isset($dados['estado']))         $update['estado']         = $dados['estado'];
-        if (isset($dados['responsavel']))    $update['responsavel']    = $dados['responsavel'];
+        if (isset($dados['estado']))        $update['estado']         = $dados['estado'];
+        if (isset($dados['responsavel']))   $update['responsavel']    = $dados['responsavel'];
         if (array_key_exists('observacoes', $dados)) $update['observacoes'] = $dados['observacoes'];
 
-        if (!empty($dados['apolice'])) {
-            $update['apolice_id'] = Apolice::where('numero', $dados['apolice'])->value('id');
+        // Data — parse tolerante
+        if (isset($dados['data'])) {
+            $data = $this->parseData($dados['data']);
+            if (!$data) {
+                return response()->json(['message' => 'Data inválida.'], 422);
+            }
+            $update['data'] = $data;
+        }
+
+        // Apólice — permite desassociar (null ou string vazia) e associar (número válido)
+        if (array_key_exists('apolice', $dados)) {
+            if (empty($dados['apolice'])) {
+                $update['apolice_id'] = null;
+            } else {
+                $apoliceId = Apolice::where('numero', $dados['apolice'])->value('id');
+                if (!$apoliceId) {
+                    return response()->json(['message' => 'Apólice não encontrada.'], 422);
+                }
+                $update['apolice_id'] = $apoliceId;
+            }
         }
 
         $s->update($update);
+        $s->load('apolice:id,numero');
 
         return response()->json([
             'id'       => (string) $s->id,
-            'sinistro' => $this->formatar($s->fresh('apolice')),
+            'sinistro' => $this->formatar($s),
         ]);
     }
 
+    /**
+     * DELETE /api/issm/sinistros/{id}
+     */
     public function destroy(int $id)
     {
         $s = Sinistro::findOrFail($id);
@@ -155,40 +199,64 @@ class IssmSinistroController extends Controller
         return response()->json(['ok' => true]);
     }
 
+    /**
+     * PUT /api/issm/sinistros/{id}/em-analise
+     */
     public function marcarEmAnalise(int $id)
     {
         $s = Sinistro::findOrFail($id);
         $s->update(['estado' => 'Em análise']);
+        $s->load('apolice:id,numero');
+
         return response()->json([
             'id'       => (string) $s->id,
-            'sinistro' => $this->formatar($s->fresh('apolice')),
+            'sinistro' => $this->formatar($s),
         ]);
     }
 
+    /**
+     * PUT /api/issm/sinistros/{id}/resolver
+     */
     public function marcarResolvido(Request $request, int $id)
     {
+        $dados = $request->validate([
+            'valorAprovado' => 'nullable|numeric|min:0',
+        ]);
+
         $s = Sinistro::findOrFail($id);
+
         $update = ['estado' => 'Resolvido'];
-        if ($request->filled('valorAprovado')) {
-            $update['valor_aprovado'] = (int) $request->valorAprovado;
+        if (array_key_exists('valorAprovado', $dados) && $dados['valorAprovado'] !== null) {
+            $update['valor_aprovado'] = $dados['valorAprovado'];
         }
+
         $s->update($update);
+        $s->load('apolice:id,numero');
+
         return response()->json([
             'id'       => (string) $s->id,
-            'sinistro' => $this->formatar($s->fresh('apolice')),
+            'sinistro' => $this->formatar($s),
         ]);
     }
 
+    /**
+     * PUT /api/issm/sinistros/{id}/recusar
+     */
     public function recusar(int $id)
     {
         $s = Sinistro::findOrFail($id);
         $s->update(['estado' => 'Recusado']);
+        $s->load('apolice:id,numero');
+
         return response()->json([
             'id'       => (string) $s->id,
-            'sinistro' => $this->formatar($s->fresh('apolice')),
+            'sinistro' => $this->formatar($s),
         ]);
     }
 
+    /**
+     * GET /api/issm/sinistros/xlsx
+     */
     public function xlsx(Request $request)
     {
         $items = $this->listarParaExport($request);
@@ -217,6 +285,9 @@ class IssmSinistroController extends Controller
         );
     }
 
+    /**
+     * GET /api/issm/sinistros/pdf
+     */
     public function pdf(Request $request)
     {
         $items = $this->listarParaExport($request);
@@ -274,8 +345,8 @@ class IssmSinistroController extends Controller
             'data'          => $s->data?->format('d/m/Y') ?? '—',
             'local'         => $s->local,
             'descricao'     => $s->descricao,
-            'valorEstimado' => (int) $s->valor_estimado,
-            'valorAprovado' => $s->valor_aprovado ? (int) $s->valor_aprovado : null,
+            'valorEstimado' => (float) $s->valor_estimado,
+            'valorAprovado' => $s->valor_aprovado !== null ? (float) $s->valor_aprovado : null,
             'estado'        => $s->estado,
             'responsavel'   => $s->responsavel,
             'observacoes'   => $s->observacoes,
@@ -283,16 +354,29 @@ class IssmSinistroController extends Controller
         ];
     }
 
+    /**
+     * KPIs — 1 query com SUM(CASE WHEN)
+     */
     private function kpis(): array
     {
+        $r = Sinistro::selectRaw("
+            COUNT(*) as total,
+            SUM(CASE WHEN estado = 'Aberto'     THEN 1 ELSE 0 END) as abertos,
+            SUM(CASE WHEN estado = 'Em análise' THEN 1 ELSE 0 END) as em_analise,
+            SUM(CASE WHEN estado = 'Resolvido'  THEN 1 ELSE 0 END) as resolvidos,
+            SUM(CASE WHEN estado = 'Recusado'   THEN 1 ELSE 0 END) as recusados,
+            SUM(valor_estimado) as valor_total,
+            SUM(valor_aprovado) as valor_aprovado
+        ")->first();
+
         return [
-            'total'        => Sinistro::count(),
-            'abertos'      => Sinistro::where('estado', 'Aberto')->count(),
-            'emAnalise'    => Sinistro::where('estado', 'Em análise')->count(),
-            'resolvidos'   => Sinistro::where('estado', 'Resolvido')->count(),
-            'recusados'    => Sinistro::where('estado', 'Recusado')->count(),
-            'valorTotal'   => Sinistro::sum('valor_estimado'),
-            'valorAprovado'=> Sinistro::sum('valor_aprovado'),
+            'total'         => (int) $r->total,
+            'abertos'       => (int) $r->abertos,
+            'emAnalise'     => (int) $r->em_analise,
+            'resolvidos'    => (int) $r->resolvidos,
+            'recusados'     => (int) $r->recusados,
+            'valorTotal'    => (float) $r->valor_total,
+            'valorAprovado' => (float) $r->valor_aprovado,
         ];
     }
 
@@ -308,11 +392,20 @@ class IssmSinistroController extends Controller
         return $query->orderByDesc('created_at')->limit(500)->get();
     }
 
-    private function parseData(string $data): Carbon
+    /**
+     * Parse tolerante: aceita `Y-m-d` e `d/m/Y`. Devolve null se inválida.
+     */
+    private function parseData(?string $data): ?Carbon
     {
-        if (preg_match('#^(\d{2})/(\d{2})/(\d{4})$#', $data, $m)) {
-            $data = "{$m[3]}-{$m[2]}-{$m[1]}";
+        if (!$data) return null;
+
+        try {
+            if (preg_match('#^(\d{2})/(\d{2})/(\d{4})$#', $data, $m)) {
+                $data = "{$m[3]}-{$m[2]}-{$m[1]}";
+            }
+            return Carbon::parse($data);
+        } catch (\Exception $e) {
+            return null;
         }
-        return Carbon::parse($data);
     }
 }

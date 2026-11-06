@@ -3,81 +3,46 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
-use App\Models\Posto;
 use App\Models\Veiculo;
-use App\Services\NotificacaoService;
 use Illuminate\Http\Request;
+use Illuminate\Validation\Rule;
 
-class VeiculoController extends Controller
+class InatroVeiculoController extends Controller
 {
     /**
      * GET /api/veiculos
+     * Lista paginada com filtros (q, provincia, estado, posto_id).
      */
     public function index(Request $request)
     {
-        $query = Veiculo::query();
+        $query = Veiculo::with('posto:id,nome')
+            ->when($request->filled('q'), function ($q) use ($request) {
+                $termo = '%' . $request->q . '%';
+                $q->where(function ($sub) use ($termo) {
+                    $sub->where('matricula', 'like', $termo)
+                        ->orWhere('marca', 'like', $termo)
+                        ->orWhere('modelo', 'like', $termo)
+                        ->orWhere('proprietario_nome', 'like', $termo)
+                        ->orWhere('proprietario_numero_id', 'like', $termo);
+                });
+            })
+            ->when($request->filled('provincia'), fn ($q) => $q->where('provincia', $request->provincia))
+            ->when($request->filled('estado'),    fn ($q) => $q->where('estado', $request->estado))
+            ->when($request->filled('posto_id'),  fn ($q) => $q->where('posto_id', $request->posto_id))
+            ->orderByDesc('id');
 
-        if ($request->filled('pesquisa')) {
-            $q = $request->pesquisa;
-            $query->where(function ($sub) use ($q) {
-                $sub->where('matricula', 'like', "%{$q}%")
-                    ->orWhere('marca', 'like', "%{$q}%")
-                    ->orWhere('modelo', 'like', "%{$q}%");
-            });
-        }
-        if ($request->filled('provincia')) {
-            $query->where('provincia', $request->provincia);
-        }
-
-        $veiculos = $query->with('posto:id,nome')
-            ->orderByDesc('created_at')
-            ->limit(100)
-            ->get()
-            ->map(fn($v) => $this->formatar($v));
+        $porPagina = max(1, min((int) $request->input('per_page', 15), 100));
+        $pagina = $query->paginate($porPagina);
 
         return response()->json([
-            'items' => $veiculos,
-            'kpis'  => $this->kpis(),
+            'data' => $pagina->items(),
+            'meta' => [
+                'total'        => $pagina->total(),
+                'por_pagina'   => $pagina->perPage(),
+                'pagina_atual' => $pagina->currentPage(),
+                'ultima'       => $pagina->lastPage(),
+            ],
         ]);
-    }
-
-    private function kpis(): array
-    {
-        $v = Veiculo::selectRaw("
-            COUNT(*) as registados,
-            SUM(CASE WHEN estado = 'regular'   THEN 1 ELSE 0 END) as ok,
-            SUM(CASE WHEN estado = 'critico'   THEN 1 ELSE 0 END) as criticos,
-            SUM(CASE WHEN estado = 'sem-dados' THEN 1 ELSE 0 END) as pendentes
-        ")->first();
-
-        return [
-            'registados' => (int) $v->registados,
-            'inspecaoOk' => (int) $v->ok,
-            'inspecaoExp' => (int) $v->criticos,
-            'pendentes'  => (int) $v->pendentes,
-        ];
-    }
-
-    private function formatar(Veiculo $v): array
-    {
-        return [
-            'id'          => (string) $v->id,
-            'matricula'   => $v->matricula,
-            'tipo'        => $v->tipo ?? '—',
-            'marca'       => $v->marca ?? '—',
-            'modelo'      => $v->modelo ?? '—',
-            'ano'         => $v->ano,
-            'cor'         => $v->cor ?? '—',
-            'combustivel' => $v->combustivel ?? '—',
-            'chassis'     => $v->chassis ?? '—',
-            'proprietario' => $v->proprietario_nome ?? '—',
-            'nif'         => $v->proprietario_numero_id ?? '—',
-            'posto'       => $v->posto?->nome ?? '—',
-            'provincia'   => $v->provincia ?? '—',
-            'score'       => (int) $v->score,
-            'estado'      => $v->estado ?? 'sem-dados',
-            'data'        => $v->created_at?->format('d/m/Y H:i') ?? '—',
-        ];
     }
 
     /**
@@ -86,70 +51,45 @@ class VeiculoController extends Controller
     public function store(Request $request)
     {
         $dados = $request->validate([
-            'matricula'     => 'required|string|max:20|unique:veiculos,matricula',
-            'tipo'          => 'required|string|max:40',
-            'marca'         => 'required|string|max:60',
-            'modelo'        => 'required|string|max:60',
-            'ano'           => 'required|integer|min:1950|max:' . date('Y'),
-            'cor'           => 'required|string|max:30',
-            'combustivel'   => 'nullable|string|max:30',
-            'chassis'       => 'nullable|string|max:30',
-            'proprietario'  => 'required|string|max:120',
-            'nif'           => 'required|string|size:9',
-            'telefone'      => 'nullable|string|max:30',
-            'provincia'     => 'required|string',
-            'endereco'      => 'nullable|string',
-            'posto'         => 'required|string',
+            'matricula'              => ['required', 'string', 'max:20', 'unique:veiculos,matricula'],
+            'marca'                  => ['required', 'string', 'max:100'],
+            'modelo'                 => ['required', 'string', 'max:100'],
+            'ano'                    => ['nullable', 'integer', 'min:1900', 'max:' . (date('Y') + 1)],
+            'cor'                    => ['nullable', 'string', 'max:50'],
+            'proprietario_nome'      => ['required', 'string', 'max:255'],
+            'proprietario_numero_id' => ['nullable', 'string', 'max:50'],
+            'posto_id'               => ['nullable', 'integer', 'exists:postos,id'],
+            'provincia'              => ['nullable', 'string', 'max:100'],
+            'estado'                 => ['nullable', Rule::in(['activo', 'suspenso', 'apreendido', 'inactivo'])],
         ]);
 
-        if (!empty($dados['chassis'])) {
-            $vin = strtoupper($dados['chassis']);
-            if (Veiculo::where('chassis', $vin)->exists()) {
-                return response()->json([
-                    'message'      => 'Não passou',
-                    'motivo_falha' => 'Número de chassis (VIN) duplicado — já registado no sistema',
-                ], 422);
-            }
-        }
+        $veiculo = Veiculo::create(array_merge($dados, [
+            'score'                => 0,
+            'estado'               => $dados['estado'] ?? 'activo',
+            'ultima_sincronizacao' => now(),
+        ]));
 
-        $posto = Posto::where('nome', $dados['posto'])->first();
-
-        $veiculo = Veiculo::create([
-            'matricula'              => strtoupper($dados['matricula']),
-            'tipo'                   => $dados['tipo'],
-            'marca'                  => $dados['marca'],
-            'modelo'                 => $dados['modelo'],
-            'ano'                    => $dados['ano'],
-            'cor'                    => $dados['cor'],
-            'combustivel'            => $dados['combustivel'] ?? null,
-            'chassis'                => isset($dados['chassis']) ? strtoupper($dados['chassis']) : null,
-            'proprietario_nome'      => $dados['proprietario'],
-            'proprietario_numero_id' => $dados['nif'],
-            'posto_id'               => $posto?->id,
-            'provincia'              => $dados['provincia'],
-            'score'                  => 50,
-            'estado'                 => 'sem-dados',
-        ]);
-
-        // 🔔 Notificar admin/chefe
-        NotificacaoService::veiculoAdicionadoHotlist(
-            $veiculo->matricula,
-            'Registo novo',
-            'medio'
-        );
+        $veiculo->load('posto:id,nome');
 
         return response()->json([
-            'id'   => (string) $veiculo->id,
-            'kpis' => $this->kpis(),
+            'message' => 'Veículo registado com sucesso.',
+            'data'    => $veiculo,
         ], 201);
     }
 
     /**
      * GET /api/veiculos/{id}
      */
-    public function show(int $id)
+    public function show($id)
     {
-        $v = Veiculo::with('posto:id,nome')->findOrFail($id);
-        return response()->json($this->formatar($v));
+        $veiculo = Veiculo::with([
+            'posto:id,nome',
+        ])->find($id);
+
+        if (!$veiculo) {
+            return response()->json(['message' => 'Veículo não encontrado.'], 404);
+        }
+
+        return response()->json(['data' => $veiculo]);
     }
 }

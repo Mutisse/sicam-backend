@@ -4,9 +4,9 @@ namespace App\Http\Controllers\Api;
 
 use App\Exports\DadosExport;
 use App\Http\Controllers\Controller;
+use App\Models\Apolice;
 use App\Models\Seguradora;
 use Barryvdh\DomPDF\Facade\Pdf;
-use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Maatwebsite\Excel\Facades\Excel;
 
@@ -78,25 +78,25 @@ class IssmSeguradoraController extends Controller
         ]);
 
         $s = Seguradora::create([
-            'codigo'              => strtoupper($dados['codigo']),
-            'sigla'               => strtoupper($dados['sigla']),
-            'nome'                => $dados['nome'],
-            'nif'                 => $dados['nif'],
-            'categoria'           => $dados['categoria'],
-            'email'               => $dados['email'],
-            'telefone'            => $dados['telefone'],
-            'website'             => $dados['website'] ?? null,
-            'endereco'            => $dados['endereco'],
-            'cidade'              => $dados['cidade'],
-            'provincia'           => $dados['provincia'],
-            'responsavel'         => $dados['responsavel'],
-            'contacto_responsavel'=> $dados['contactoResponsavel'] ?? null,
-            'numero_apoles'       => 0,
-            'numero_sinistros'    => 0,
-            'estado'              => $dados['estado'] ?? 'Activa',
-            'observacoes'         => $dados['observacoes'] ?? null,
-            'registada_em'        => now(),
-            'criado_por'          => $request->user()?->id,
+            'codigo'               => strtoupper($dados['codigo']),
+            'sigla'                => strtoupper($dados['sigla']),
+            'nome'                 => $dados['nome'],
+            'nif'                  => $dados['nif'],
+            'categoria'            => $dados['categoria'],
+            'email'                => $dados['email'],
+            'telefone'             => $dados['telefone'],
+            'website'              => $dados['website'] ?? null,
+            'endereco'             => $dados['endereco'],
+            'cidade'               => $dados['cidade'],
+            'provincia'            => $dados['provincia'],
+            'responsavel'          => $dados['responsavel'],
+            'contacto_responsavel' => $dados['contactoResponsavel'] ?? null,
+            'numero_apoles'        => 0,
+            'numero_sinistros'     => 0,
+            'estado'               => $dados['estado'] ?? 'Activa',
+            'observacoes'          => $dados['observacoes'] ?? null,
+            'registada_em'         => now(),
+            'criado_por'           => $request->user()?->id,
         ]);
 
         return response()->json([
@@ -157,10 +157,22 @@ class IssmSeguradoraController extends Controller
 
     /**
      * DELETE /api/issm/seguradoras/{id}
+     *
+     * Bloqueia se existirem apólices associadas — seguradoras são
+     * entidades de referência, não devem ficar órfãs.
      */
     public function destroy(int $id)
     {
         $s = Seguradora::findOrFail($id);
+
+        $temApolices = Apolice::where('seguradora', $s->nome)->exists();
+        if ($temApolices) {
+            return response()->json([
+                'message' => 'Não é possível eliminar: existem apólices associadas a esta seguradora. '
+                           . 'Use "Inactivar" em vez de eliminar.',
+            ], 422);
+        }
+
         $s->delete();
 
         return response()->json([
@@ -272,10 +284,10 @@ class IssmSeguradoraController extends Controller
             'cabecalhos'  => $cabecalhos,
             'linhas'      => $linhas,
             'resumo'      => [
-                'Total'    => $items->count(),
-                'Activas'  => $items->where('estado', 'Activa')->count(),
-                'Suspensas'=> $items->where('estado', 'Suspensa')->count(),
-                'Inactivas'=> $items->where('estado', 'Inactiva')->count(),
+                'Total'     => $items->count(),
+                'Activas'   => $items->where('estado', 'Activa')->count(),
+                'Suspensas' => $items->where('estado', 'Suspensa')->count(),
+                'Inactivas' => $items->where('estado', 'Inactiva')->count(),
             ],
             'geradoEm'    => now()->format('d/m/Y H:i'),
         ])->setPaper('a4', 'landscape');
@@ -312,15 +324,27 @@ class IssmSeguradoraController extends Controller
         ];
     }
 
+    /**
+     * KPIs — 1 query com SUM(CASE WHEN)
+     */
     private function kpis(): array
     {
+        $r = Seguradora::selectRaw("
+            COUNT(*) as total,
+            SUM(CASE WHEN estado = 'Activa'   THEN 1 ELSE 0 END) as activas,
+            SUM(CASE WHEN estado = 'Suspensa' THEN 1 ELSE 0 END) as suspensas,
+            SUM(CASE WHEN estado = 'Inactiva' THEN 1 ELSE 0 END) as inactivas,
+            SUM(numero_apoles) as total_apoles,
+            SUM(numero_sinistros) as total_sinistros
+        ")->first();
+
         return [
-            'total'          => Seguradora::count(),
-            'activas'        => Seguradora::where('estado', 'Activa')->count(),
-            'suspensas'      => Seguradora::where('estado', 'Suspensa')->count(),
-            'inactivas'      => Seguradora::where('estado', 'Inactiva')->count(),
-            'totalApoles'    => Seguradora::sum('numero_apoles'),
-            'totalSinistros' => Seguradora::sum('numero_sinistros'),
+            'total'          => (int) $r->total,
+            'activas'        => (int) $r->activas,
+            'suspensas'      => (int) $r->suspensas,
+            'inactivas'      => (int) $r->inactivas,
+            'totalApoles'    => (int) $r->total_apoles,
+            'totalSinistros' => (int) $r->total_sinistros,
         ];
     }
 

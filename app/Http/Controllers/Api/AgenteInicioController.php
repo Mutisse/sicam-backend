@@ -34,7 +34,6 @@ class AgenteInicioController extends Controller
 
     /**
      * POST /api/agente/consultas/registar
-     * Body: { matricula, posto?, score? }
      */
     public function registarConsulta(Request $request)
     {
@@ -87,20 +86,23 @@ class AgenteInicioController extends Controller
     }
 
     // ============================================================
-    // Helpers — SÓ DADOS REAIS DO UTILIZADOR
+    // Helpers
     // ============================================================
 
+    /**
+     * KPIs — consultas do cache, hotlist e autos.
+     */
     private function kpis(User $user): array
     {
         $hoje = now()->toDateString();
 
-        // Consultas — do cache (incrementado por registarConsulta)
+        // Consultas — do cache
         $consultas = (int) Cache::get(
             "agente:{$user->id}:consultas:{$hoje}",
             0,
         );
 
-        // Críticos — hotlist activa (global, é o universo real)
+        // Críticos — hotlist activa (global)
         $criticos = DB::table('hotlist')
             ->where('estado', 'Activo')
             ->count();
@@ -141,7 +143,6 @@ class AgenteInicioController extends Controller
 
     private function requerAtencao(User $user): array
     {
-        // Hotlist activa do POSTO do utilizador
         $posto = $user->posto;
 
         $query = DB::table('hotlist')
@@ -158,7 +159,6 @@ class AgenteInicioController extends Controller
             )
             ->where('hotlist.estado', 'Activo');
 
-        // Filtra pelo posto do utilizador, se tiver
         if ($posto) {
             $query->where('hotlist.posto', $posto);
         }
@@ -195,7 +195,6 @@ class AgenteInicioController extends Controller
 
     private function patrulhaEmCurso(User $user): ?array
     {
-        // Só a patrulha do próprio utilizador, em curso
         $p = DB::table('patrulhas')
             ->where('agente_id', $user->id)
             ->where('estado', 'Em curso')

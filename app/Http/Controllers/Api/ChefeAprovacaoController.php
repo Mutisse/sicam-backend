@@ -5,6 +5,7 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\Aprovacao;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 
 class ChefeAprovacaoController extends Controller
 {
@@ -63,9 +64,9 @@ class ChefeAprovacaoController extends Controller
         ]);
 
         return response()->json([
-            'id'     => (string) $a->id,
-            'aprovacao' => $this->formatar($a->fresh()),
-            'kpis'   => $this->kpis(),
+            'id'        => (string) $a->id,
+            'aprovacao' => $this->formatar($a),
+            'kpis'      => $this->kpis(),
         ]);
     }
 
@@ -89,9 +90,9 @@ class ChefeAprovacaoController extends Controller
         ]);
 
         return response()->json([
-            'id'     => (string) $a->id,
-            'aprovacao' => $this->formatar($a->fresh()),
-            'kpis'   => $this->kpis(),
+            'id'        => (string) $a->id,
+            'aprovacao' => $this->formatar($a),
+            'kpis'      => $this->kpis(),
         ]);
     }
 
@@ -120,17 +121,24 @@ class ChefeAprovacaoController extends Controller
         ];
     }
 
+    /**
+     * KPIs — 1 query com SUM(CASE).
+     */
     private function kpis(): array
     {
         $hoje = now()->startOfDay();
 
+        $row = Aprovacao::selectRaw("
+            SUM(CASE WHEN estado = 'pendente' THEN 1 ELSE 0 END) as pendentes,
+            SUM(CASE WHEN estado = 'aprovado' AND decidido_em >= ? THEN 1 ELSE 0 END) as aprovados_hoje,
+            SUM(CASE WHEN estado = 'rejeitado' AND decidido_em >= ? THEN 1 ELSE 0 END) as rejeitados_hoje
+        ", [$hoje, $hoje])->first();
+
         return [
-            'pendentes'       => Aprovacao::where('estado', 'pendente')->count(),
-            'aprovadosHoje'   => Aprovacao::where('estado', 'aprovado')
-                ->where('decidido_em', '>=', $hoje)->count(),
-            'rejeitadosHoje'  => Aprovacao::where('estado', 'rejeitado')
-                ->where('decidido_em', '>=', $hoje)->count(),
-            'tempoMedio'      => 12,
+            'pendentes'      => (int) $row->pendentes,
+            'aprovadosHoje'  => (int) $row->aprovados_hoje,
+            'rejeitadosHoje' => (int) $row->rejeitados_hoje,
+            'tempoMedio'     => 12, // stub — não há dados reais de tempo
         ];
     }
 }

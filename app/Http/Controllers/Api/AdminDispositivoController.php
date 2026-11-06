@@ -7,15 +7,13 @@ use App\Http\Controllers\Controller;
 use App\Models\Dispositivo;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Maatwebsite\Excel\Facades\Excel;
 
 class AdminDispositivoController extends Controller
 {
     private const VERSAO_ATUAL = '2.5.0';
 
-    /**
-     * GET /api/admin/dispositivos
-     */
     public function index(Request $request)
     {
         $query = Dispositivo::query();
@@ -29,8 +27,8 @@ class AdminDispositivoController extends Controller
             });
         }
 
-        if ($request->filled('estado'))   $query->where('estado', $request->estado);
-        if ($request->filled('versao'))   $query->where('versao_app', $request->versao);
+        if ($request->filled('estado')) $query->where('estado', $request->estado);
+        if ($request->filled('versao')) $query->where('versao_app', $request->versao);
 
         $items = $query
             ->orderByDesc('updated_at')
@@ -45,25 +43,19 @@ class AdminDispositivoController extends Controller
         ]);
     }
 
-    /**
-     * GET /api/admin/dispositivos/{id}
-     */
     public function show(int $id)
     {
         $d = Dispositivo::findOrFail($id);
         return response()->json($this->formatar($d));
     }
 
-    /**
-     * POST /api/admin/dispositivos
-     */
     public function store(Request $request)
     {
         $dados = $request->validate([
-            'serie'   => 'required|string|max:40|unique:dispositivos,serie',
-            'modelo'  => 'required|string|max:120',
-            'agente'  => 'nullable|string|max:160',
-            'notas'   => 'nullable|string',
+            'serie'  => 'required|string|max:40|unique:dispositivos,serie',
+            'modelo' => 'required|string|max:120',
+            'agente' => 'nullable|string|max:160',
+            'notas'  => 'nullable|string',
         ]);
 
         $temAgente = !empty($dados['agente']);
@@ -80,24 +72,21 @@ class AdminDispositivoController extends Controller
         ]);
 
         return response()->json([
-            'id'           => (string) $d->id,
-            'dispositivo'  => $this->formatar($d),
-            'kpis'         => $this->kpis(),
+            'id'          => (string) $d->id,
+            'dispositivo' => $this->formatar($d),
+            'kpis'        => $this->kpis(),
         ], 201);
     }
 
-    /**
-     * PUT /api/admin/dispositivos/{id}
-     */
     public function update(Request $request, int $id)
     {
         $d = Dispositivo::findOrFail($id);
 
         $dados = $request->validate([
-            'serie'   => 'sometimes|string|max:40|unique:dispositivos,serie,' . $id,
-            'modelo'  => 'sometimes|string|max:120',
-            'agente'  => 'nullable|string|max:160',
-            'notas'   => 'nullable|string',
+            'serie'  => 'sometimes|string|max:40|unique:dispositivos,serie,' . $id,
+            'modelo' => 'sometimes|string|max:120',
+            'agente' => 'nullable|string|max:160',
+            'notas'  => 'nullable|string',
         ]);
 
         $update = [];
@@ -113,14 +102,11 @@ class AdminDispositivoController extends Controller
 
         return response()->json([
             'id'          => (string) $d->id,
-            'dispositivo' => $this->formatar($d->fresh()),
+            'dispositivo' => $this->formatar($d),
             'kpis'        => $this->kpis(),
         ]);
     }
 
-    /**
-     * DELETE /api/admin/dispositivos/{id}
-     */
     public function destroy(int $id)
     {
         $d = Dispositivo::findOrFail($id);
@@ -132,9 +118,6 @@ class AdminDispositivoController extends Controller
         ]);
     }
 
-    /**
-     * PUT /api/admin/dispositivos/{id}/actualizar-versao
-     */
     public function marcarAtualizado(int $id)
     {
         $d = Dispositivo::findOrFail($id);
@@ -145,14 +128,11 @@ class AdminDispositivoController extends Controller
 
         return response()->json([
             'id'          => (string) $d->id,
-            'dispositivo' => $this->formatar($d->fresh()),
+            'dispositivo' => $this->formatar($d),
             'kpis'        => $this->kpis(),
         ]);
     }
 
-    /**
-     * PUT /api/admin/dispositivos/{id}/desassociar
-     */
     public function desassociar(int $id)
     {
         $d = Dispositivo::findOrFail($id);
@@ -163,14 +143,11 @@ class AdminDispositivoController extends Controller
 
         return response()->json([
             'id'          => (string) $d->id,
-            'dispositivo' => $this->formatar($d->fresh()),
+            'dispositivo' => $this->formatar($d),
             'kpis'        => $this->kpis(),
         ]);
     }
 
-    /**
-     * GET /api/admin/dispositivos/xlsx
-     */
     public function xlsx()
     {
         $items = Dispositivo::orderBy('serie')->limit(1000)->get();
@@ -214,13 +191,23 @@ class AdminDispositivoController extends Controller
         ];
     }
 
+    /**
+     * KPIs — 1 query só (SUM CASE) em vez de 4.
+     */
     private function kpis(): array
     {
+        $row = Dispositivo::selectRaw("
+            COUNT(*) as total,
+            SUM(CASE WHEN estado = 'Ativo' THEN 1 ELSE 0 END) as activos,
+            SUM(CASE WHEN estado = 'Por registar' THEN 1 ELSE 0 END) as por_registar,
+            SUM(CASE WHEN versao_app != ? THEN 1 ELSE 0 END) as desatualizados
+        ", [self::VERSAO_ATUAL])->first();
+
         return [
-            'total'            => Dispositivo::count(),
-            'activos'          => Dispositivo::where('estado', 'Ativo')->count(),
-            'porRegistar'      => Dispositivo::where('estado', 'Por registar')->count(),
-            'desatualizados'   => Dispositivo::where('versao_app', '!=', self::VERSAO_ATUAL)->count(),
+            'total'          => (int) $row->total,
+            'activos'        => (int) $row->activos,
+            'porRegistar'    => (int) $row->por_registar,
+            'desatualizados' => (int) $row->desatualizados,
         ];
     }
 }

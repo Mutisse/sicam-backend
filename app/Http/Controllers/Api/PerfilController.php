@@ -43,15 +43,13 @@ class PerfilController extends Controller
 
         $user->save();
 
-        // ═══════════════════════════════════════════════════════
-        // 🔔 GATILHO — Email alterado
-        // ═══════════════════════════════════════════════════════
+        // 🔔 GATILHO — Email alterado (depois da resposta)
         if (isset($dados['email']) && $dados['email'] !== $emailAntigo) {
-            NotificacaoService::emailAlterado(
-                $user->id,
-                $emailAntigo,
-                $dados['email']
-            );
+            $userId = $user->id;
+            $novoEmail = $dados['email'];
+            dispatch(function () use ($userId, $emailAntigo, $novoEmail) {
+                NotificacaoService::emailAlterado($userId, $emailAntigo, $novoEmail);
+            })->afterResponse();
         }
 
         return response()->json([
@@ -80,10 +78,11 @@ class PerfilController extends Controller
         $user->password = $dados['senha_nova'];
         $user->save();
 
-        // ═══════════════════════════════════════════════════════
-        // 🔔 GATILHO — Senha alterada
-        // ═══════════════════════════════════════════════════════
-        NotificacaoService::senhaAlterada($user->id);
+        // 🔔 GATILHO — Senha alterada (depois da resposta)
+        $userId = $user->id;
+        dispatch(function () use ($userId) {
+            NotificacaoService::senhaAlterada($userId);
+        })->afterResponse();
 
         return response()->noContent();
     }
@@ -149,8 +148,11 @@ class PerfilController extends Controller
             ->where('id', '!=', $sessaoAtual)
             ->delete();
 
-        // 🔔 Opcional: notificar que outras sessões foram terminadas
-        NotificacaoService::outrasSessoesTerminadas($user->id);
+        // 🔔 GATILHO — Outras sessões terminadas (depois da resposta)
+        $userId = $user->id;
+        dispatch(function () use ($userId) {
+            NotificacaoService::outrasSessoesTerminadas($userId);
+        })->afterResponse();
 
         return response()->noContent();
     }

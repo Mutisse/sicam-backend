@@ -13,11 +13,10 @@ class AgenteHistoricoController extends Controller
 {
     /**
      * GET /api/agente/historico
-     * Query params opcionais: periodo=hoje|7d|30d|tudo, estado=critico|atencao|regular, q=busca
      */
     public function index(Request $request)
     {
-        $eu = auth()->user();
+        $eu = $request->user();
         if (!$eu) {
             return response()->json(['message' => 'Não autenticado.'], 401);
         }
@@ -29,21 +28,19 @@ class AgenteHistoricoController extends Controller
         // Filtro de período
         $periodo = $request->get('periodo', 'tudo');
         $desde = match ($periodo) {
-            'hoje'   => Carbon::today(),
-            '7d'     => Carbon::now()->subDays(7),
-            '30d'    => Carbon::now()->subDays(30),
-            default  => null,
+            'hoje'  => Carbon::today(),
+            '7d'    => Carbon::now()->subDays(7),
+            '30d'   => Carbon::now()->subDays(30),
+            default => null,
         };
         if ($desde) {
             $query->where('consultado_em', '>=', $desde);
         }
 
-        // Filtro de estado
         if ($request->filled('estado')) {
             $query->where('estado', $request->estado);
         }
 
-        // Busca
         if ($request->filled('q')) {
             $q = $request->q;
             $query->where(function ($s) use ($q) {
@@ -63,11 +60,10 @@ class AgenteHistoricoController extends Controller
 
     /**
      * POST /api/agente/historico
-     * Regista uma consulta (chamado quando o agente consulta um veículo).
      */
     public function store(Request $request)
     {
-        $eu = auth()->user();
+        $eu = $request->user();
         if (!$eu) {
             return response()->json(['message' => 'Não autenticado.'], 401);
         }
@@ -100,7 +96,7 @@ class AgenteHistoricoController extends Controller
      */
     public function xlsx(Request $request)
     {
-        $eu = auth()->user();
+        $eu = $request->user();
 
         $items = ConsultaAgente::where('agente_id', $eu->id)
             ->orderByDesc('consultado_em')
@@ -133,17 +129,17 @@ class AgenteHistoricoController extends Controller
     private function formatar(ConsultaAgente $c): array
     {
         return [
-            'id'        => (string) $c->id,
-            'matricula' => $c->matricula,
-            'posto'     => $c->posto ?? '—',
-            'score'     => $c->score,
-            'estado'    => $c->estado,
-            'origem'    => $c->origem,
+            'id'           => (string) $c->id,
+            'matricula'    => $c->matricula,
+            'posto'        => $c->posto ?? '—',
+            'score'        => $c->score,
+            'estado'       => $c->estado,
+            'origem'       => $c->origem,
             'consultadoEm' => $c->consultado_em?->toIso8601String(),
-            'hora'      => $c->consultado_em?->format('H:i') ?? '—',
-            'data'      => $c->consultado_em?->format('d/m/Y') ?? '—',
-            'dataHora'  => $c->consultado_em?->format('d/m/Y H:i') ?? '—',
-            'diasAtras' => $c->consultado_em ? $c->consultado_em->diffInDays(now()) : 999,
+            'hora'         => $c->consultado_em?->format('H:i') ?? '—',
+            'data'         => $c->consultado_em?->format('d/m/Y') ?? '—',
+            'dataHora'     => $c->consultado_em?->format('d/m/Y H:i') ?? '—',
+            'diasAtras'    => $c->consultado_em ? $c->consultado_em->diffInDays(now()) : 999,
         ];
     }
 
@@ -155,16 +151,27 @@ class AgenteHistoricoController extends Controller
         return 'regular';
     }
 
+    /**
+     * KPIs — 1 query com SUM(CASE) em vez de 5.
+     */
     private function kpis(int $agenteId): array
     {
-        $base = ConsultaAgente::where('agente_id', $agenteId);
+        $row = ConsultaAgente::where('agente_id', $agenteId)
+            ->selectRaw("
+                COUNT(*) as total,
+                SUM(CASE WHEN consultado_em >= ? THEN 1 ELSE 0 END) as hoje,
+                SUM(CASE WHEN estado = 'critico' THEN 1 ELSE 0 END) as criticos,
+                SUM(CASE WHEN estado = 'atencao' THEN 1 ELSE 0 END) as atencao,
+                SUM(CASE WHEN estado = 'regular' THEN 1 ELSE 0 END) as regulares
+            ", [Carbon::today()])
+            ->first();
 
         return [
-            'total'     => (clone $base)->count(),
-            'hoje'      => (clone $base)->where('consultado_em', '>=', Carbon::today())->count(),
-            'criticos'  => (clone $base)->where('estado', 'critico')->count(),
-            'atencao'   => (clone $base)->where('estado', 'atencao')->count(),
-            'regulares' => (clone $base)->where('estado', 'regular')->count(),
+            'total'     => (int) $row->total,
+            'hoje'      => (int) $row->hoje,
+            'criticos'  => (int) $row->criticos,
+            'atencao'   => (int) $row->atencao,
+            'regulares' => (int) $row->regulares,
         ];
     }
 }

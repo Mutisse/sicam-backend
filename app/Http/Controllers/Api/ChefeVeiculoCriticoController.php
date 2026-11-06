@@ -65,25 +65,24 @@ class ChefeVeiculoCriticoController extends Controller
     public function store(Request $request)
     {
         $dados = $request->validate([
-            'matricula'          => 'required|string|max:20',
-            'marca'              => 'required|string|max:60',
-            'modelo'             => 'required|string|max:60',
-            'proprietario'       => 'required|string|max:120',
-            'nif'                => 'required|string|size:9',
-            'telefone'           => 'nullable|string|max:30',
-            'motivo'             => 'required|string|max:60',
-            'prioridade'         => 'required|string|in:Baixa,Média,Alta,Urgente',
-            'estado'             => 'nullable|string|max:40',
-            'posto'              => 'nullable|string|max:120',
-            'zona'               => 'nullable|string|max:120',
-            'agente'             => 'nullable|string|max:120',
-            'multas_pendentes'   => 'nullable|integer|min:0',
-            'valor_multas'       => 'nullable|integer|min:0',
-            'observacoes'        => 'nullable|string',
+            'matricula'        => 'required|string|max:20',
+            'marca'            => 'required|string|max:60',
+            'modelo'           => 'required|string|max:60',
+            'proprietario'     => 'required|string|max:120',
+            'nif'              => 'required|string|size:9',
+            'telefone'         => 'nullable|string|max:30',
+            'motivo'           => 'required|string|max:60',
+            'prioridade'       => 'required|string|in:Baixa,Média,Alta,Urgente',
+            'estado'           => 'nullable|string|max:40',
+            'posto'            => 'nullable|string|max:120',
+            'zona'             => 'nullable|string|max:120',
+            'agente'           => 'nullable|string|max:120',
+            'multas_pendentes' => 'nullable|integer|min:0',
+            'valor_multas'     => 'nullable|integer|min:0',
+            'observacoes'      => 'nullable|string',
         ]);
 
-        $resultado = DB::transaction(function () use ($dados, $request) {
-            // 1) Criar ou atualizar o veículo
+        $resultado = DB::transaction(function () use ($dados) {
             $veiculo = Veiculo::firstOrCreate(
                 ['matricula' => strtoupper($dados['matricula'])],
                 [
@@ -95,7 +94,6 @@ class ChefeVeiculoCriticoController extends Controller
                 ],
             );
 
-            // Se já existia, atualizar dados base
             if (!$veiculo->wasRecentlyCreated) {
                 $veiculo->update([
                     'marca'                  => $dados['marca'],
@@ -108,8 +106,7 @@ class ChefeVeiculoCriticoController extends Controller
 
             $agora = now();
 
-            // 2) Criar registo na hotlist
-            $h = Hotlist::create([
+            return Hotlist::create([
                 'veiculo_id'       => $veiculo->id,
                 'motivo'           => $dados['motivo'],
                 'perigo'           => $this->perigoDe($dados['prioridade']),
@@ -130,13 +127,11 @@ class ChefeVeiculoCriticoController extends Controller
                     ],
                 ],
             ]);
-
-            return $h;
         });
 
         return response()->json([
             'id'      => (string) $resultado->id,
-            'veiculo' => $this->formatar($resultado->fresh('veiculo')),
+            'veiculo' => $this->formatar($resultado->load('veiculo')),
         ], 201);
     }
 
@@ -148,23 +143,22 @@ class ChefeVeiculoCriticoController extends Controller
         $h = Hotlist::findOrFail($id);
 
         $dados = $request->validate([
-            'marca'              => 'sometimes|string|max:60',
-            'modelo'             => 'sometimes|string|max:60',
-            'proprietario'       => 'sometimes|string|max:120',
-            'nif'                => 'sometimes|string|size:9',
-            'telefone'           => 'nullable|string|max:30',
-            'motivo'             => 'sometimes|string|max:60',
-            'prioridade'         => 'sometimes|string|in:Baixa,Média,Alta,Urgente',
-            'estado'             => 'sometimes|string|max:40',
-            'posto'              => 'nullable|string|max:120',
-            'zona'               => 'nullable|string|max:120',
-            'agente'             => 'nullable|string|max:120',
-            'multas_pendentes'   => 'nullable|integer|min:0',
-            'valor_multas'       => 'nullable|integer|min:0',
-            'observacoes'        => 'nullable|string',
+            'marca'            => 'sometimes|string|max:60',
+            'modelo'           => 'sometimes|string|max:60',
+            'proprietario'     => 'sometimes|string|max:120',
+            'nif'              => 'sometimes|string|size:9',
+            'telefone'         => 'nullable|string|max:30',
+            'motivo'           => 'sometimes|string|max:60',
+            'prioridade'       => 'sometimes|string|in:Baixa,Média,Alta,Urgente',
+            'estado'           => 'sometimes|string|max:40',
+            'posto'            => 'nullable|string|max:120',
+            'zona'             => 'nullable|string|max:120',
+            'agente'           => 'nullable|string|max:120',
+            'multas_pendentes' => 'nullable|integer|min:0',
+            'valor_multas'     => 'nullable|integer|min:0',
+            'observacoes'      => 'nullable|string',
         ]);
 
-        // Atualizar veículo
         if ($h->veiculo) {
             $h->veiculo->update(array_filter([
                 'marca'                  => $dados['marca'] ?? null,
@@ -174,7 +168,6 @@ class ChefeVeiculoCriticoController extends Controller
             ]));
         }
 
-        // Atualizar hotlist
         $h->update([
             'motivo'           => $dados['motivo'] ?? $h->motivo,
             'prioridade'       => $dados['prioridade'] ?? $h->prioridade,
@@ -190,7 +183,7 @@ class ChefeVeiculoCriticoController extends Controller
 
         return response()->json([
             'id'      => (string) $h->id,
-            'veiculo' => $this->formatar($h->fresh('veiculo')),
+            'veiculo' => $this->formatar($h->load('veiculo')),
         ]);
     }
 
@@ -215,7 +208,7 @@ class ChefeVeiculoCriticoController extends Controller
 
         return response()->json([
             'id'      => (string) $h->id,
-            'veiculo' => $this->formatar($h->fresh('veiculo')),
+            'veiculo' => $this->formatar($h->load('veiculo')),
         ]);
     }
 
@@ -230,7 +223,7 @@ class ChefeVeiculoCriticoController extends Controller
 
         return response()->json([
             'id'      => (string) $h->id,
-            'veiculo' => $this->formatar($h->fresh('veiculo')),
+            'veiculo' => $this->formatar($h->load('veiculo')),
         ]);
     }
 
@@ -332,7 +325,7 @@ class ChefeVeiculoCriticoController extends Controller
             'modelo'           => $v?->modelo ?? '—',
             'proprietario'     => $v?->proprietario_nome ?? '—',
             'nif'              => $v?->proprietario_numero_id ?? '—',
-            'telefone'         => '—',  // não existe na BD
+            'telefone'         => '—',
             'motivo'           => $h->motivo ?? 'Outro',
             'prioridade'       => $h->prioridade ?? 'Média',
             'estado'           => $this->mapearEstado($h->estado),
@@ -348,17 +341,27 @@ class ChefeVeiculoCriticoController extends Controller
         ];
     }
 
+    /**
+     * KPIs — 1 query com SUM(CASE).
+     */
     private function kpis(): array
     {
-        $activos = Hotlist::where('estado', '!=', 'Arquivado');
+        $row = Hotlist::selectRaw("
+            SUM(CASE WHEN estado != 'Arquivado' THEN 1 ELSE 0 END) as total,
+            SUM(CASE WHEN estado != 'Arquivado' AND motivo = 'Hotlist PRM' THEN 1 ELSE 0 END) as hotlist,
+            SUM(CASE WHEN estado != 'Arquivado' AND motivo = 'Seguro expirado' THEN 1 ELSE 0 END) as seguro_expirado,
+            SUM(CASE WHEN estado != 'Arquivado' AND estado = 'Em averiguação' THEN 1 ELSE 0 END) as em_averiguacao,
+            SUM(CASE WHEN estado != 'Arquivado' AND prioridade = 'Urgente' THEN 1 ELSE 0 END) as urgentes,
+            SUM(CASE WHEN estado = 'Resolvido' THEN 1 ELSE 0 END) as resolvidos
+        ")->first();
 
         return [
-            'total'          => (clone $activos)->count(),
-            'hotlist'        => (clone $activos)->where('motivo', 'Hotlist PRM')->count(),
-            'seguroExpirado' => (clone $activos)->where('motivo', 'Seguro expirado')->count(),
-            'emAveriguacao'  => (clone $activos)->where('estado', 'Em averiguação')->count(),
-            'urgentes'       => (clone $activos)->where('prioridade', 'Urgente')->count(),
-            'resolvidos'     => Hotlist::where('estado', 'Resolvido')->count(),
+            'total'          => (int) $row->total,
+            'hotlist'        => (int) $row->hotlist,
+            'seguroExpirado' => (int) $row->seguro_expirado,
+            'emAveriguacao'  => (int) $row->em_averiguacao,
+            'urgentes'       => (int) $row->urgentes,
+            'resolvidos'     => (int) $row->resolvidos,
         ];
     }
 
@@ -396,8 +399,6 @@ class ChefeVeiculoCriticoController extends Controller
 
     private function mapearEstado(?string $estado): string
     {
-        // A BD guarda 'Activo', 'Resolvido', etc.
-        // O frontend espera 'Activo', 'Em averiguação', 'Resolvido', 'Arquivado'
         if (!$estado) return 'Activo';
         return $estado;
     }

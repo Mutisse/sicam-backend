@@ -7,6 +7,7 @@ use App\Models\Apolice;
 use App\Models\Multa;
 use App\Models\Recibo;
 use App\Models\Veiculo;
+use App\Services\NotificacaoService;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\DB;
 
@@ -79,11 +80,13 @@ class AdminIntegracaoController extends Controller
         foreach ($servicos as $s) {
             $inicio = microtime(true);
             $ok = true;
+            $mensagemErro = null;
 
             try {
                 ($s['check'])();
             } catch (\Throwable $e) {
                 $ok = false;
+                $mensagemErro = $e->getMessage();
             }
 
             $latencia = (int) round((microtime(true) - $inicio) * 1000);
@@ -91,6 +94,26 @@ class AdminIntegracaoController extends Controller
             $estado = 'regular';
             if (!$ok || $latencia >= 800) $estado = 'critico';
             elseif ($latencia >= 400) $estado = 'atencao';
+
+            // ═══════════════════════════════════════════════════════
+            // 🔔 GATILHO — Falha de integração
+            //    Só notifica quando o serviço FALHA (não em latência alta).
+            //    Depois da resposta, para não bloquear o pedido.
+            // ═══════════════════════════════════════════════════════
+            if (!$ok) {
+                $nomeServico = $s['nome'];
+                $erro        = $mensagemErro ?? 'Erro desconhecido';
+
+                dispatch(function () use ($nomeServico, $erro) {
+                    // Evita spam: só notifica 1x a cada 10 min por serviço
+                    $chave = "notificar.falha.{$nomeServico}";
+                    if (Cache::has($chave)) return;
+
+                    Cache::put($chave, true, now()->addMinutes(10));
+
+                    NotificacaoService::falhaIntegracao($nomeServico, $erro);
+                })->afterResponse();
+            }
 
             $resultado[] = [
                 'nome'           => $s['nome'],

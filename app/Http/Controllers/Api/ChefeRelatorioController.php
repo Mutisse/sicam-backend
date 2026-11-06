@@ -45,7 +45,6 @@ class ChefeRelatorioController extends Controller
 
         $kpis = $this->kpis($de, $ate);
 
-        // Resumo
         $resumo = [
             'Consultas'     => $kpis['consultas'],
             'Autos'         => $kpis['autos'],
@@ -55,7 +54,6 @@ class ChefeRelatorioController extends Controller
             'Não conformes' => $kpis['naoConformes'],
         ];
 
-        // Tabela — Desempenho por agente
         $cabecalhos = ['Agente', 'Consultas', 'Autos', 'Abordagens', 'Regularidade'];
         $linhas = [];
 
@@ -69,7 +67,6 @@ class ChefeRelatorioController extends Controller
             ];
         }
 
-        // Tabela — Resumo por patrulha (bloco separado)
         $linhas[] = ['', '', '', '', ''];
         $linhas[] = ['RESUMO POR PATRULHA', '', '', '', ''];
         $linhas[] = ['Código', 'Data', 'Agente', 'Duração', 'Veículos'];
@@ -145,25 +142,28 @@ class ChefeRelatorioController extends Controller
     // ============================================================
     private function kpis(Carbon $de, Carbon $ate): array
     {
-        $consultas = Patrulha::whereBetween('created_at', [$de, $ate])->count()
-                   + Multa::whereBetween('created_at', [$de, $ate])->count()
-                   + Aprovacao::whereBetween('created_at', [$de, $ate])->count();
+        // ⭐ 3 queries em 1 (patrulhas + multas + aprovações)
+        $p = Patrulha::whereBetween('created_at', [$de, $ate])
+            ->selectRaw("
+                COUNT(*) as total,
+                SUM(CASE WHEN estado = 'Concluída' THEN 1 ELSE 0 END) as concluidas
+            ")
+            ->first();
 
-        $autos      = Multa::whereBetween('created_at', [$de, $ate])->count();
-        $abordagens = Patrulha::whereBetween('created_at', [$de, $ate])->count();
+        $totalPatrulhas = (int) $p->total;
+        $concluidas     = (int) $p->concluidas;
 
-        $totalPatrulhas = Patrulha::whereBetween('created_at', [$de, $ate])->count();
-        $concluidas     = Patrulha::whereBetween('created_at', [$de, $ate])
-            ->where('estado', 'Concluída')->count();
+        $autos = Multa::whereBetween('created_at', [$de, $ate])->count();
+        $aprovacoes = Aprovacao::whereBetween('created_at', [$de, $ate])->count();
 
         $conformidade = $totalPatrulhas > 0
             ? round(($concluidas / $totalPatrulhas) * 100, 1)
             : 0;
 
         return [
-            'consultas'    => $consultas,
+            'consultas'    => $autos + $totalPatrulhas + $aprovacoes,
             'autos'        => $autos,
-            'abordagens'   => $abordagens,
+            'abordagens'   => $totalPatrulhas,
             'conformidade' => $conformidade,
             'conformes'    => $concluidas,
             'naoConformes' => $totalPatrulhas - $concluidas,
@@ -171,7 +171,7 @@ class ChefeRelatorioController extends Controller
     }
 
     // ============================================================
-    // Consultas por dia (últimos 7 dias dentro do período)
+    // Consultas por dia
     // ============================================================
     private function consultasPorDia(Carbon $de, Carbon $ate): array
     {
@@ -224,7 +224,7 @@ class ChefeRelatorioController extends Controller
     }
 
     // ============================================================
-    // Desempenho por agente (tabela)
+    // Desempenho por agente
     // ============================================================
     private function desempenhoPorAgente(Carbon $de, Carbon $ate): array
     {
@@ -233,20 +233,34 @@ class ChefeRelatorioController extends Controller
 
         if ($agentes->isEmpty()) return [];
 
+        $ids = $agentes->pluck('id')->toArray();
+
+        // ⭐ Batch — 1 query para todas as multas
+        $multasPorAgente = Multa::select('agente_id', DB::raw('COUNT(*) as total'))
+            ->whereIn('agente_id', $ids)
+            ->whereBetween('created_at', [$de, $ate])
+            ->groupBy('agente_id')
+            ->pluck('total', 'agente_id')
+            ->toArray();
+
+        // ⭐ Batch — 1 query para todas as patrulhas (total + concluídas)
+        $patrulhasPorAgente = Patrulha::selectRaw("
+            agente_id,
+            COUNT(*) as total,
+            SUM(CASE WHEN estado = 'Concluída' THEN 1 ELSE 0 END) as concluidas
+        ")
+            ->whereIn('agente_id', $ids)
+            ->whereBetween('created_at', [$de, $ate])
+            ->groupBy('agente_id')
+            ->get()
+            ->keyBy('agente_id');
+
         $resultado = [];
 
         foreach ($agentes as $a) {
-            $multas = Multa::where('agente_id', $a->id)
-                ->whereBetween('created_at', [$de, $ate])->count();
-
-            $patrulhas = Patrulha::where('agente_id', $a->id)
-                ->whereBetween('created_at', [$de, $ate])->count();
-
-            $consultas = $multas + $patrulhas;
-
-            $concluidas = Patrulha::where('agente_id', $a->id)
-                ->whereBetween('created_at', [$de, $ate])
-                ->where('estado', 'Concluída')->count();
+            $multas    = (int) ($multasPorAgente[$a->id] ?? 0);
+            $patrulhas = (int) ($patrulhasPorAgente[$a->id]->total ?? 0);
+            $concluidas = (int) ($patrulhasPorAgente[$a->id]->concluidas ?? 0);
 
             $regularidade = $patrulhas > 0
                 ? round(($concluidas / $patrulhas) * 100)
@@ -254,7 +268,7 @@ class ChefeRelatorioController extends Controller
 
             $resultado[] = [
                 'nome'         => $a->name,
-                'consultas'    => $consultas,
+                'consultas'    => $multas + $patrulhas,
                 'autos'        => $multas,
                 'abordagens'   => $patrulhas,
                 'regularidade' => $regularidade,
@@ -267,7 +281,7 @@ class ChefeRelatorioController extends Controller
     }
 
     // ============================================================
-    // Resumo por patrulha (tabela)
+    // Resumo por patrulha
     // ============================================================
     private function resumoPatrulhas(Carbon $de, Carbon $ate): array
     {

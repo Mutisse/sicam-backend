@@ -12,7 +12,7 @@ use Maatwebsite\Excel\Facades\Excel;
 class AdminPerfilController extends Controller
 {
     /**
-     * Módulos disponíveis (o frontend espera estes 13)
+     * Módulos disponíveis (o frontend espera estes 14)
      */
     private const MODULOS = [
         'dashboard', 'monitorizacao', 'relatorios', 'backups',
@@ -27,20 +27,21 @@ class AdminPerfilController extends Controller
     {
         $perfis = Perfil::orderBy('label')->get();
 
-        // Contagem de utilizadores por perfil
+        // ⭐ 1 query para todos os utilizadores (em vez de N)
         $contagem = DB::table('users')
             ->select('perfil_id', DB::raw('COUNT(*) as total'))
             ->groupBy('perfil_id')
             ->pluck('total', 'perfil_id')
             ->toArray();
 
-        $items = $perfis->map(function ($p) use ($contagem) {
-            $permissoes = DB::table('perfil_permissoes')
-                ->where('perfil_id', $p->id)
-                ->get()
-                ->keyBy('modulo');
+        // ⭐ 1 query para todas as permissões (evita N+1)
+        $todasPermissoes = DB::table('perfil_permissoes')
+            ->get()
+            ->groupBy('perfil_id');
 
-            // Constrói array de permissões apenas para os módulos do frontend
+        $items = $perfis->map(function ($p) use ($contagem, $todasPermissoes) {
+            $permissoes = ($todasPermissoes[$p->id] ?? collect())->keyBy('modulo');
+
             $permArray = [];
             foreach (self::MODULOS as $m) {
                 $perm = $permissoes->get($m);
@@ -53,23 +54,12 @@ class AdminPerfilController extends Controller
                 ];
             }
 
-            return [
-                'id'           => (string) $p->id,
-                'key'          => $p->key,
-                'label'        => $p->label,
-                'descricao'    => $p->descricao ?? '',
-                'icon'         => $p->icon,
-                'cor'          => $p->cor,
-                'estado'       => $p->estado,
-                'sistema'      => (bool) $p->sistema,
-                'utilizadores' => (int) ($contagem[$p->id] ?? 0),
-                'permissoes'   => $permArray,
-            ];
+            return $this->formatar($p, (int) ($contagem[$p->id] ?? 0), $permArray);
         });
 
         return response()->json([
-            'items'  => $items,
-            'acoes'  => [
+            'items' => $items,
+            'acoes' => [
                 ['key' => 'ver',    'label' => 'Ver'],
                 ['key' => 'criar',  'label' => 'Criar'],
                 ['key' => 'editar', 'label' => 'Editar'],
@@ -104,18 +94,7 @@ class AdminPerfilController extends Controller
             ];
         }
 
-        return response()->json([
-            'id'           => (string) $p->id,
-            'key'          => $p->key,
-            'label'        => $p->label,
-            'descricao'    => $p->descricao ?? '',
-            'icon'         => $p->icon,
-            'cor'          => $p->cor,
-            'estado'       => $p->estado,
-            'sistema'      => (bool) $p->sistema,
-            'utilizadores' => $contagem,
-            'permissoes'   => $permArray,
-        ]);
+        return response()->json($this->formatar($p, $contagem, $permArray));
     }
 
     /**
@@ -149,7 +128,6 @@ class AdminPerfilController extends Controller
                 'sistema'   => false,
             ]);
 
-            // Inserir permissões
             foreach ($dados['permissoes'] as $perm) {
                 DB::table('perfil_permissoes')->insert([
                     'perfil_id'  => $perfil->id,
@@ -167,8 +145,8 @@ class AdminPerfilController extends Controller
         });
 
         return response()->json([
-            'id'    => (string) $p->id,
-            'perfil'=> $this->show((int) $p->id)->getData(true),
+            'id'     => (string) $p->id,
+            'perfil' => $this->show((int) $p->id)->getData(true),
         ], 201);
     }
 
@@ -205,7 +183,6 @@ class AdminPerfilController extends Controller
 
             if (!empty($update)) $p->update($update);
 
-            // Atualizar permissões — remove antigas e insere as novas
             if (!empty($dados['permissoes'])) {
                 DB::table('perfil_permissoes')->where('perfil_id', $p->id)->delete();
 
@@ -225,8 +202,8 @@ class AdminPerfilController extends Controller
         });
 
         return response()->json([
-            'id'    => (string) $p->id,
-            'perfil'=> $this->show((int) $p->id)->getData(true),
+            'id'     => (string) $p->id,
+            'perfil' => $this->show((int) $p->id)->getData(true),
         ]);
     }
 
@@ -299,8 +276,8 @@ class AdminPerfilController extends Controller
         });
 
         return response()->json([
-            'id'    => (string) $novo->id,
-            'perfil'=> $this->show((int) $novo->id)->getData(true),
+            'id'     => (string) $novo->id,
+            'perfil' => $this->show((int) $novo->id)->getData(true),
         ], 201);
     }
 
@@ -313,8 +290,8 @@ class AdminPerfilController extends Controller
         $p->update(['estado' => 'Bloqueado']);
 
         return response()->json([
-            'id'    => (string) $p->id,
-            'perfil'=> $this->show((int) $p->id)->getData(true),
+            'id'     => (string) $p->id,
+            'perfil' => $this->show((int) $p->id)->getData(true),
         ]);
     }
 
@@ -327,8 +304,8 @@ class AdminPerfilController extends Controller
         $p->update(['estado' => 'Ativo']);
 
         return response()->json([
-            'id'    => (string) $p->id,
-            'perfil'=> $this->show((int) $p->id)->getData(true),
+            'id'     => (string) $p->id,
+            'perfil' => $this->show((int) $p->id)->getData(true),
         ]);
     }
 
@@ -339,14 +316,16 @@ class AdminPerfilController extends Controller
     {
         $perfis = Perfil::orderBy('label')->get();
 
+        // ⭐ 1 query para todas as permissões (evita N+1)
+        $todasPermissoes = DB::table('perfil_permissoes')
+            ->get()
+            ->groupBy('perfil_id');
+
         $cabecalhos = ['Perfil', 'Módulo', 'Ver', 'Criar', 'Editar', 'Apagar'];
         $linhas = [];
 
         foreach ($perfis as $p) {
-            $perms = DB::table('perfil_permissoes')
-                ->where('perfil_id', $p->id)
-                ->get()
-                ->keyBy('modulo');
+            $perms = ($todasPermissoes[$p->id] ?? collect())->keyBy('modulo');
 
             foreach (self::MODULOS as $m) {
                 $perm = $perms->get($m);
@@ -365,5 +344,25 @@ class AdminPerfilController extends Controller
             new DadosExport($linhas, $cabecalhos, 'Perfis'),
             'admin-perfis-' . date('Y-m-d') . '.xlsx',
         );
+    }
+
+    // ============================================================
+    // Helpers
+    // ============================================================
+
+    private function formatar(Perfil $p, int $utilizadores, array $permArray): array
+    {
+        return [
+            'id'           => (string) $p->id,
+            'key'          => $p->key,
+            'label'        => $p->label,
+            'descricao'    => $p->descricao ?? '',
+            'icon'         => $p->icon,
+            'cor'          => $p->cor,
+            'estado'       => $p->estado,
+            'sistema'      => (bool) $p->sistema,
+            'utilizadores' => $utilizadores,
+            'permissoes'   => $permArray,
+        ];
     }
 }

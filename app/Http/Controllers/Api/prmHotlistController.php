@@ -5,51 +5,68 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\Hotlist;
 use App\Models\Veiculo;
-use App\Services\NotificacaoService;
 use Illuminate\Http\Request;
+use Illuminate\Validation\Rule;
 
-class HotlistController extends Controller
+class PrmHotlistController extends Controller
 {
     /**
      * GET /api/hotlist
+     * Devolve { items, kpis } — contrato esperado pelo hotlist.service.ts.
      */
     public function index(Request $request)
     {
-        // ⭐ Eager loading COMPLETO (evita N+1)
-        $query = Hotlist::with([
-            'veiculo:id,matricula,marca,modelo,cor,provincia,posto_id',
-            'veiculo.posto:id,nome',
-        ]);
+        $query = Hotlist::with(['veiculo:id,matricula,marca,modelo,cor'])
+            ->when($request->filled('q'), function ($q) use ($request) {
+                $termo = '%' . $request->q . '%';
+                $q->where(function ($sub) use ($termo) {
+                    $sub->where('motivo', 'like', $termo)
+                        ->orWhere('zona', 'like', $termo)
+                        ->orWhere('agente', 'like', $termo)
+                        ->orWhereHas('veiculo', fn ($v) => $v->where('matricula', 'like', $termo));
+                });
+            })
+            ->when($request->filled('estado'),     fn ($q) => $q->where('estado', $request->estado))
+            ->when($request->filled('prioridade'), fn ($q) => $q->where('prioridade', $request->prioridade))
+            ->when($request->filled('perigo'),     fn ($q) => $q->where('perigo', $request->perigo))
+            ->orderByRaw("FIELD(prioridade, 'critica','alta','media','baixa')")
+            ->orderByDesc('detectado_em')
+            ->orderByDesc('id');
 
-        // ⭐ JOIN direto (mais rápido que whereHas)
-        if ($request->filled('pesquisa')) {
-            $q = $request->pesquisa;
-            $query->join('veiculos', 'veiculos.id', '=', 'hotlist.veiculo_id')
-                ->where(function ($sub) use ($q) {
-                    $sub->where('veiculos.matricula', 'like', "%{$q}%")
-                        ->orWhere('veiculos.marca', 'like', "%{$q}%")
-                        ->orWhere('veiculos.modelo', 'like', "%{$q}%");
-                })
-                ->select('hotlist.*'); // evita colisão de colunas
-        }
+        $items = $query->get()->map(function (Hotlist $h) {
+            $nivelMap = ['critica' => 'Alto', 'alta' => 'Alto', 'media' => 'Médio', 'baixa' => 'Baixo'];
+            $estadoMap = ['ativo' => 'Ativo', 'resolvido' => 'Resolvido', 'arquivado' => 'Resolvido'];
 
-        if ($request->filled('motivo')) {
-            $query->where('hotlist.motivo', $request->motivo);
-        }
-        if ($request->filled('perigo')) {
-            $query->where('hotlist.perigo', $request->perigo);
-        }
-        if ($request->filled('estado')) {
-            $query->where('hotlist.estado', $request->estado);
-        }
-
-        $items = $query->orderByDesc('hotlist.created_at')
-            ->get()
-            ->map(fn ($h) => $this->formatar($h));
+            return [
+                'id'           => (string) $h->id,
+                'matricula'    => $h->veiculo->matricula ?? '',
+                'marca'        => $h->veiculo->marca ?? '',
+                'modelo'       => $h->veiculo->modelo ?? '',
+                'cor'          => $h->veiculo->cor ?? '',
+                'origem'       => 'PRM',
+                'dataInsercao' => $h->detectado_em ? $h->detectado_em->format('d/m/Y') : '',
+                'horaInsercao' => $h->detectado_em ? $h->detectado_em->format('H:i') : '',
+                'local'        => $h->zona ?? '',
+                'posto'        => $h->posto ?? '',
+                'agente'       => $h->agente ?? '',
+                'motivo'       => $h->motivo,
+                'nivel'        => $nivelMap[$h->prioridade] ?? 'Médio',
+                'estado'       => $estadoMap[$h->estado] ?? 'Ativo',
+                'abordagens'   => 0,
+                'observacoes'  => $h->descricao,
+            ];
+        })->values();
 
         return response()->json([
             'items' => $items,
-            'kpis'  => $this->kpis(),
+            'kpis'  => [
+                'total'    => $items->count(),
+                'furtados' => $items->where('motivo', 'Furtado')->count(),
+                'clonagem' => $items->where('motivo', 'Clonagem suspeita')->count(),
+                'mandados' => $items->where('motivo', 'Mandado de captura')->count(),
+                'altos'    => $items->where('nivel', 'Alto')->count(),
+                'ativos'   => $items->where('estado', 'Ativo')->count(),
+            ],
         ]);
     }
 
@@ -58,156 +75,150 @@ class HotlistController extends Controller
      */
     public function kpisEndpoint()
     {
-        return response()->json($this->kpis());
-    }
-
-    /**
-     * ⭐ KPIs — 1 única query
-     */
-    private function kpis(): array
-    {
-        $row = Hotlist::selectRaw("
-            COUNT(*) as total,
-            SUM(CASE WHEN motivo = 'Furtado' THEN 1 ELSE 0 END) as furtados,
-            SUM(CASE WHEN motivo = 'Clonagem suspeita' THEN 1 ELSE 0 END) as clonagem,
-            SUM(CASE WHEN motivo = 'Mandado captura' THEN 1 ELSE 0 END) as mandados,
-            SUM(CASE WHEN perigo = 'alto' AND estado = 'Activo' THEN 1 ELSE 0 END) as altos,
-            SUM(CASE WHEN estado = 'Activo' THEN 1 ELSE 0 END) as ativos
-        ")->first();
-
-        return [
-            'total'     => (int) $row->total,
-            'furtados'  => (int) $row->furtados,
-            'clonagem'  => (int) $row->clonagem,
-            'mandados'  => (int) $row->mandados,
-            'altos'     => (int) $row->altos,
-            'ativos'    => (int) $row->ativos,
-        ];
-    }
-
-    /**
-     * Formatar um item
-     */
-    private function formatar(Hotlist $h): array
-    {
-        $v = $h->veiculo;
-
-        return [
-            'id'           => (string) $h->id,
-            'matricula'    => $v?->matricula ?? '—',
-            'marca'        => $v?->marca ?? '—',
-            'modelo'       => $v?->modelo ?? '—',
-            'cor'          => $v?->cor ?? '—',
-            'motivo'       => $h->motivo,
-            'nivel'        => ucfirst($h->perigo),
-            'origem'       => 'SICAM',
-            'dataInsercao' => $h->created_at?->format('d/m/Y') ?? '—',
-            'horaInsercao' => $h->created_at?->format('H:i') ?? '—',
-            'local'        => $v?->provincia ?? '—',
-            'posto'        => $v?->posto?->nome ?? '—',
-            'agente'       => 'Sistema',
-            'abordagens'   => 0,
-            'estado'       => $h->estado === 'Activo' ? 'Ativo' : 'Resolvido',
-            'observacoes'  => $h->descricao ?? '',
-        ];
+        return response()->json([
+            'total'      => Hotlist::count(),
+            'ativos'     => Hotlist::where('estado', 'ativo')->count(),
+            'resolvidos' => Hotlist::where('estado', 'resolvido')->count(),
+            'criticos'   => Hotlist::where('prioridade', 'critica')->where('estado', 'ativo')->count(),
+            'multas_pendentes' => (int) Hotlist::where('estado', 'ativo')->sum('multas_pendentes'),
+            'valor_multas'     => (int) Hotlist::where('estado', 'ativo')->sum('valor_multas'),
+        ]);
     }
 
     /**
      * POST /api/hotlist
+     * Frontend envia: { matricula, motivo, perigo, descricao }
      */
     public function store(Request $request)
     {
         $dados = $request->validate([
-            'matricula' => 'required|string|max:20',
-            'motivo'    => 'required|string',
-            'perigo'    => 'required|in:alto,medio,baixo',
-            'descricao' => 'nullable|string',
+            'matricula' => ['required', 'string', 'max:20', 'exists:veiculos,matricula'],
+            'motivo'    => ['required', 'string', 'max:255'],
+            'perigo'    => ['nullable', 'string', 'max:50'],
+            'descricao' => ['nullable', 'string'],
         ]);
 
-        $veiculo = Veiculo::firstOrCreate(
-            ['matricula' => strtoupper($dados['matricula'])],
-            ['marca' => '—', 'modelo' => '—', 'score' => 0, 'estado' => 'sem-dados']
-        );
+        try {
+            $veiculo = Veiculo::where('matricula', $dados['matricula'])->firstOrFail();
 
-        $hotlist = Hotlist::create([
-            'veiculo_id'   => $veiculo->id,
-            'motivo'       => $dados['motivo'],
-            'perigo'       => $dados['perigo'],
-            'estado'       => 'Activo',
-            'descricao'    => $dados['descricao'] ?? null,
-            'detectado_em' => now(),
-        ]);
+            // Mapear perigo → prioridade
+            $prioridadeMap = ['alto' => 'alta', 'medio' => 'media', 'baixo' => 'baixa'];
 
-        // ═══════════════════════════════════════════════════════
-        // 🔔 GATILHO — Veículo adicionado à hotlist
-        // ═══════════════════════════════════════════════════════
-        NotificacaoService::veiculoAdicionadoHotlist(
-            $veiculo->matricula,
-            $dados['motivo'],
-            $dados['perigo']
-        );
+            $hotlist = Hotlist::create([
+                'veiculo_id'       => $veiculo->id,
+                'motivo'           => $dados['motivo'],
+                'perigo'           => $dados['perigo'] ?? null,
+                'prioridade'       => $prioridadeMap[$dados['perigo'] ?? ''] ?? 'media',
+                'agente'           => auth()->user()->name ?? null,
+                'posto'            => null,
+                'zona'             => null,
+                'multas_pendentes' => 0,
+                'valor_multas'     => 0,
+                'estado'           => 'ativo',
+                'descricao'        => $dados['descricao'] ?? null,
+                'historico'        => [[
+                    'em'   => now()->toIso8601String(),
+                    'acao' => 'criado',
+                    'por'  => auth()->user()->name ?? 'sistema',
+                ]],
+                'detectado_em'     => now(),
+            ]);
 
-        return response()->json($hotlist, 201);
+            return response()->json([
+                'id'   => (string) $hotlist->id,
+                'kpis' => [],
+            ], 201);
+        } catch (\Throwable $e) {
+            return response()->json([
+                'message' => 'Falha ao adicionar à hotlist.',
+                'error'   => $e->getMessage(),
+            ], 500);
+        }
     }
 
     /**
      * PUT /api/hotlist/{id}
+     * Frontend envia: { motivo, perigo, descricao }
      */
-    public function update(Request $request, int $id)
+    public function update(Request $request, $id)
     {
-        $hotlist = Hotlist::findOrFail($id);
-
-        $dados = $request->validate([
-            'motivo'    => 'sometimes|string',
-            'perigo'    => 'sometimes|in:alto,medio,baixo',
-            'estado'    => 'sometimes|in:Activo,Resolvido',
-            'descricao' => 'nullable|string',
-        ]);
-
-        $hotlist->update($dados);
-
-        if (($dados['estado'] ?? null) === 'Resolvido') {
-            $hotlist->resolvido_em = now();
-            $hotlist->save();
-
-            // 🔔 GATILHO — Veículo resolvido
-            NotificacaoService::veiculoResolvido(
-                $hotlist->veiculo?->matricula ?? '—',
-                $hotlist->motivo
-            );
+        $hotlist = Hotlist::find($id);
+        if (!$hotlist) {
+            return response()->json(['message' => 'Registo não encontrado.'], 404);
         }
 
-        return response()->json($hotlist);
+        $dados = $request->validate([
+            'motivo'    => ['sometimes', 'string', 'max:255'],
+            'perigo'    => ['nullable', 'string', 'max:50'],
+            'descricao' => ['nullable', 'string'],
+        ]);
+
+        if (array_key_exists('perigo', $dados)) {
+            $map = ['alto' => 'alta', 'medio' => 'media', 'baixo' => 'baixa'];
+            $dados['prioridade'] = $map[$dados['perigo'] ?? ''] ?? 'media';
+        }
+
+        $historico = $hotlist->historico ?? [];
+        $historico[] = [
+            'em'     => now()->toIso8601String(),
+            'acao'   => 'atualizado',
+            'por'    => auth()->user()->name ?? 'sistema',
+            'campos' => array_keys($dados),
+        ];
+
+        $hotlist->update(array_merge($dados, ['historico' => $historico]));
+
+        return response()->json([
+            'message' => 'Registo atualizado.',
+            'data'    => $hotlist->fresh('veiculo:id,matricula,marca,modelo'),
+        ]);
     }
 
     /**
      * PUT /api/hotlist/{id}/resolver
      */
-    public function resolver(int $id)
+    public function resolver(Request $request, $id)
     {
-        $hotlist = Hotlist::with('veiculo:id,matricula')->findOrFail($id);
+        $hotlist = Hotlist::find($id);
+        if (!$hotlist) {
+            return response()->json(['message' => 'Registo não encontrado.'], 404);
+        }
+
+        if ($hotlist->estado === 'resolvido') {
+            return response()->json(['message' => 'Registo já está resolvido.'], 409);
+        }
+
+        $historico = $hotlist->historico ?? [];
+        $historico[] = [
+            'em'   => now()->toIso8601String(),
+            'acao' => 'resolvido',
+            'por'  => auth()->user()->name ?? 'sistema',
+            'nota' => $request->input('nota'),
+        ];
+
         $hotlist->update([
-            'estado'       => 'Resolvido',
+            'estado'       => 'resolvido',
             'resolvido_em' => now(),
+            'historico'    => $historico,
         ]);
 
-        // ═══════════════════════════════════════════════════════
-        // 🔔 GATILHO — Veículo resolvido
-        // ═══════════════════════════════════════════════════════
-        NotificacaoService::veiculoResolvido(
-            $hotlist->veiculo?->matricula ?? '—',
-            $hotlist->motivo
-        );
-
-        return response()->noContent();
+        return response()->json([
+            'message' => 'Registo marcado como resolvido.',
+            'data'    => $hotlist->fresh('veiculo:id,matricula,marca,modelo'),
+        ]);
     }
 
     /**
      * DELETE /api/hotlist/{id}
      */
-    public function destroy(int $id)
+    public function destroy($id)
     {
-        Hotlist::findOrFail($id)->delete();
-        return response()->noContent();
+        $hotlist = Hotlist::find($id);
+        if (!$hotlist) {
+            return response()->json(['message' => 'Registo não encontrado.'], 404);
+        }
+
+        $hotlist->delete();
+        return response()->json(['message' => 'Registo eliminado.']);
     }
 }

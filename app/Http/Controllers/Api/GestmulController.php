@@ -38,10 +38,10 @@ class GestmulController extends Controller
         $taxa        = $total > 0 ? round(($pagas / $total) * 100, 1) : 0;
 
         $kpis = [
-            ['key' => 'emitidas',   'label' => 'Emitidas',    'valor' => $total,       'total' => $total ?: 1, 'variant' => 'g'],
-            ['key' => 'pagas',      'label' => 'Pagas',       'valor' => $pagas,       'total' => $total ?: 1, 'variant' => 'g'],
-            ['key' => 'pendentes',  'label' => 'Pendentes',   'valor' => $pendentes,   'total' => $total ?: 1, 'variant' => 'y'],
-            ['key' => 'contesta',   'label' => 'Contestadas', 'valor' => $contestadas, 'total' => $total ?: 1, 'variant' => 'r'],
+            ['key' => 'emitidas',  'label' => 'Emitidas',    'valor' => $total,       'total' => $total ?: 1, 'variant' => 'g'],
+            ['key' => 'pagas',     'label' => 'Pagas',       'valor' => $pagas,       'total' => $total ?: 1, 'variant' => 'g'],
+            ['key' => 'pendentes', 'label' => 'Pendentes',   'valor' => $pendentes,   'total' => $total ?: 1, 'variant' => 'y'],
+            ['key' => 'contesta',  'label' => 'Contestadas', 'valor' => $contestadas, 'total' => $total ?: 1, 'variant' => 'r'],
         ];
 
         // ═══════════════════════════════════════════════════════
@@ -124,7 +124,7 @@ class GestmulController extends Controller
         ];
 
         // ═══════════════════════════════════════════════════════
-        // 6) Tabela por província — 1 query (já estava OK)
+        // 6) Tabela por província — 1 query
         // ═══════════════════════════════════════════════════════
         $porProvincia = Multa::select(
                 'provincia',
@@ -141,7 +141,7 @@ class GestmulController extends Controller
             'titulo'  => 'Por província',
             'colunas' => ['Província', 'Emitidas', 'Pagas', 'Cobrado (MT)', 'Taxa'],
             'linhas'  => $porProvincia->map(function ($p) {
-                $t = (int) $p->total;
+                $t  = (int) $p->total;
                 $pg = (int) $p->pagas;
                 $tx = $t > 0 ? round(($pg / $t) * 100) : 0;
 

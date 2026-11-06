@@ -17,7 +17,7 @@ class AdminDashboardController extends Controller
     public function admin(Request $request)
     {
         // ═══════════════════════════════════════════════════════
-        // ⭐ KPIs — 1 query só com SUM(CASE WHEN)
+        // KPIs — 1 query com SUM(CASE WHEN) — aspas simples
         // ═══════════════════════════════════════════════════════
         $k = Veiculo::selectRaw("
             COUNT(*) as total,
@@ -36,11 +36,11 @@ class AdminDashboardController extends Controller
         $semDados = (int) $k->sem_dados;
         $semSinc  = (int) $k->sem_sincronizar;
 
-        // ⭐ 1 query — agentes offline
+        // Agentes offline
         $agentesOffline = User::where('estado', 'Offline')->count();
 
         // ═══════════════════════════════════════════════════════
-        // ⭐ Requer intervenção — 1 query
+        // Requer intervenção — 1 query
         // ═══════════════════════════════════════════════════════
         $requerIntervencao = Veiculo::with('posto:id,nome')
             ->whereNotNull('score')
@@ -55,7 +55,7 @@ class AdminDashboardController extends Controller
             ]);
 
         // ═══════════════════════════════════════════════════════
-        // ⭐ Agentes em patrulha — 1 query
+        // Agentes em patrulha — 1 query
         // ═══════════════════════════════════════════════════════
         $agentes = Patrulha::with([
                 'agente:id,name,estado',
@@ -71,9 +71,7 @@ class AdminDashboardController extends Controller
                 'online'  => $p->agente?->estado === 'Ativo',
             ]);
 
-        // ═══════════════════════════════════════════════════════
         // Taxa de conformidade
-        // ═══════════════════════════════════════════════════════
         $taxa = $total > 0
             ? round((($regular + $atencao * 0.5) / $total) * 100, 1)
             : 0;

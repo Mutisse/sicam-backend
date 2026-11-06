@@ -12,9 +12,6 @@ use Maatwebsite\Excel\Facades\Excel;
 
 class GestmulContestacaoController extends Controller
 {
-    /**
-     * GET /api/gestmul/contestacoes
-     */
     public function index(Request $request)
     {
         $query = Contestacao::query();
@@ -46,35 +43,29 @@ class GestmulContestacaoController extends Controller
         ]);
     }
 
-    /**
-     * GET /api/gestmul/contestacoes/{id}
-     */
     public function show(int $id)
     {
         $c = Contestacao::findOrFail($id);
         return response()->json($this->formatar($c));
     }
 
-    /**
-     * POST /api/gestmul/contestacoes
-     */
     public function store(Request $request)
     {
         $dados = $request->validate([
-            'numero'        => 'nullable|string|max:30|unique:contestacoes,numero',
-            'multaCodigo'   => 'required|string|max:30',
-            'matricula'     => 'required|string|max:20',
-            'infracao'      => 'nullable|string|max:160',
-            'valorMulta'    => 'nullable|numeric|min:0',
-            'contestante'   => 'required|string|max:160',
-            'nif'           => 'required|string|size:9',
-            'contacto'      => 'nullable|string|max:30',
-            'motivo'        => 'required|string|max:120',
-            'descricao'     => 'required|string|min:20',
-            'prioridade'    => 'nullable|string|in:Baixa,Média,Alta',
-            'prazoLimite'   => 'required|string',
-            'estado'        => 'nullable|string|in:Pendente,Em análise,Aceite,Rejeitada,Cancelada',
-            'observacoes'   => 'nullable|string',
+            'numero'      => 'nullable|string|max:30|unique:contestacoes,numero',
+            'multaCodigo' => 'required|string|max:30',
+            'matricula'   => 'required|string|max:20',
+            'infracao'    => 'nullable|string|max:160',
+            'valorMulta'  => 'nullable|numeric|min:0',
+            'contestante' => 'required|string|max:160',
+            'nif'         => 'required|string|size:9',
+            'contacto'    => 'nullable|string|max:30',
+            'motivo'      => 'required|string|max:120',
+            'descricao'   => 'required|string|min:20',
+            'prioridade'  => 'nullable|string|in:Baixa,Média,Alta',
+            'prazoLimite' => 'required|string',
+            'estado'      => 'nullable|string|in:Pendente,Em análise,Aceite,Rejeitada,Cancelada',
+            'observacoes' => 'nullable|string',
         ]);
 
         $numero = $dados['numero'] ?? $this->gerarNumero();
@@ -105,27 +96,24 @@ class GestmulContestacaoController extends Controller
         ], 201);
     }
 
-    /**
-     * PUT /api/gestmul/contestacoes/{id}
-     */
     public function update(Request $request, int $id)
     {
         $c = Contestacao::findOrFail($id);
 
         $dados = $request->validate([
-            'multaCodigo'   => 'sometimes|string|max:30',
-            'matricula'     => 'sometimes|string|max:20',
-            'infracao'      => 'nullable|string|max:160',
-            'valorMulta'    => 'sometimes|numeric|min:0',
-            'contestante'   => 'sometimes|string|max:160',
-            'nif'           => 'sometimes|string|size:9',
-            'contacto'      => 'nullable|string|max:30',
-            'motivo'        => 'sometimes|string|max:120',
-            'descricao'     => 'sometimes|string|min:20',
-            'prioridade'    => 'sometimes|string|in:Baixa,Média,Alta',
-            'prazoLimite'   => 'sometimes|string',
-            'estado'        => 'sometimes|string|in:Pendente,Em análise,Aceite,Rejeitada,Cancelada',
-            'observacoes'   => 'nullable|string',
+            'multaCodigo' => 'sometimes|string|max:30',
+            'matricula'   => 'sometimes|string|max:20',
+            'infracao'    => 'nullable|string|max:160',
+            'valorMulta'  => 'sometimes|numeric|min:0',
+            'contestante' => 'sometimes|string|max:160',
+            'nif'         => 'sometimes|string|size:9',
+            'contacto'    => 'nullable|string|max:30',
+            'motivo'      => 'sometimes|string|max:120',
+            'descricao'   => 'sometimes|string|min:20',
+            'prioridade'  => 'sometimes|string|in:Baixa,Média,Alta',
+            'prazoLimite' => 'sometimes|string',
+            'estado'      => 'sometimes|string|in:Pendente,Em análise,Aceite,Rejeitada,Cancelada',
+            'observacoes' => 'nullable|string',
         ]);
 
         $update = [];
@@ -147,14 +135,11 @@ class GestmulContestacaoController extends Controller
 
         return response()->json([
             'id'          => (string) $c->id,
-            'contestacao' => $this->formatar($c->fresh()),
+            'contestacao' => $this->formatar($c),
             'kpis'        => $this->kpis(),
         ]);
     }
 
-    /**
-     * DELETE /api/gestmul/contestacoes/{id}
-     */
     public function destroy(int $id)
     {
         $c = Contestacao::findOrFail($id);
@@ -166,9 +151,6 @@ class GestmulContestacaoController extends Controller
         ]);
     }
 
-    /**
-     * PUT /api/gestmul/contestacoes/{id}/em-analise
-     */
     public function marcarEmAnalise(int $id)
     {
         $c = Contestacao::findOrFail($id);
@@ -176,14 +158,11 @@ class GestmulContestacaoController extends Controller
 
         return response()->json([
             'id'          => (string) $c->id,
-            'contestacao' => $this->formatar($c->fresh()),
+            'contestacao' => $this->formatar($c),
             'kpis'        => $this->kpis(),
         ]);
     }
 
-    /**
-     * PUT /api/gestmul/contestacoes/{id}/cancelar
-     */
     public function cancelar(int $id)
     {
         $c = Contestacao::findOrFail($id);
@@ -191,14 +170,11 @@ class GestmulContestacaoController extends Controller
 
         return response()->json([
             'id'          => (string) $c->id,
-            'contestacao' => $this->formatar($c->fresh()),
+            'contestacao' => $this->formatar($c),
             'kpis'        => $this->kpis(),
         ]);
     }
 
-    /**
-     * POST /api/gestmul/contestacoes/{id}/decidir
-     */
     public function decidir(Request $request, int $id)
     {
         $c = Contestacao::findOrFail($id);
@@ -218,14 +194,11 @@ class GestmulContestacaoController extends Controller
 
         return response()->json([
             'id'          => (string) $c->id,
-            'contestacao' => $this->formatar($c->fresh()),
+            'contestacao' => $this->formatar($c),
             'kpis'        => $this->kpis(),
         ]);
     }
 
-    /**
-     * GET /api/gestmul/contestacoes/xlsx
-     */
     public function xlsx(Request $request)
     {
         $items = $this->listarParaExport($request);
@@ -257,9 +230,6 @@ class GestmulContestacaoController extends Controller
         );
     }
 
-    /**
-     * GET /api/gestmul/contestacoes/pdf
-     */
     public function pdf(Request $request)
     {
         $items = $this->listarParaExport($request);
@@ -307,49 +277,57 @@ class GestmulContestacaoController extends Controller
     private function formatar(Contestacao $c): array
     {
         return [
-            'id'             => (string) $c->id,
-            'numero'         => $c->numero,
-            'multaCodigo'    => $c->multa_codigo,
-            'matricula'      => $c->matricula,
-            'infracao'       => $c->infracao,
-            'valorMulta'     => (float) $c->valor_multa,
-            'contestante'    => $c->contestante,
-            'nif'            => $c->nif,
-            'contacto'       => $c->contacto ?? '—',
-            'motivo'         => $c->motivo,
-            'descricao'      => $c->descricao,
-            'prioridade'     => $c->prioridade,
-            'dataSubmissao'  => $c->data_submissao?->format('d/m/Y') ?? '—',
-            'prazoLimite'    => $c->prazo_limite?->format('d/m/Y') ?? '—',
-            'estado'         => $c->estado,
-            'decisao'        => $c->decisao,
-            'decisaoEm'      => $c->decisao_em?->format('d/m/Y H:i'),
-            'decisaoPor'     => $c->decisao_por,
-            'observacoes'    => $c->observacoes,
-            'criadoEm'       => $c->created_at?->format('d/m/Y H:i') ?? '—',
+            'id'            => (string) $c->id,
+            'numero'        => $c->numero,
+            'multaCodigo'   => $c->multa_codigo,
+            'matricula'     => $c->matricula,
+            'infracao'      => $c->infracao,
+            'valorMulta'    => (float) $c->valor_multa,
+            'contestante'   => $c->contestante,
+            'nif'           => $c->nif,
+            'contacto'      => $c->contacto ?? '—',
+            'motivo'        => $c->motivo,
+            'descricao'     => $c->descricao,
+            'prioridade'    => $c->prioridade,
+            'dataSubmissao' => $c->data_submissao?->format('d/m/Y') ?? '—',
+            'prazoLimite'   => $c->prazo_limite?->format('d/m/Y') ?? '—',
+            'estado'        => $c->estado,
+            'decisao'       => $c->decisao,
+            'decisaoEm'     => $c->decisao_em?->format('d/m/Y H:i'),
+            'decisaoPor'    => $c->decisao_por,
+            'observacoes'   => $c->observacoes,
+            'criadoEm'      => $c->created_at?->format('d/m/Y H:i') ?? '—',
         ];
     }
 
+    /**
+     * KPIs — 1 query com SUM(CASE) em vez de 6.
+     */
     private function kpis(): array
     {
-        $pendentes = Contestacao::where('estado', 'Pendente')->count();
-        $emAnalise = Contestacao::where('estado', 'Em análise')->count();
+        $hoje = Carbon::today();
+
+        $row = Contestacao::selectRaw("
+            COUNT(*) as total,
+            SUM(CASE WHEN estado = 'Pendente'    THEN 1 ELSE 0 END) as pendentes,
+            SUM(CASE WHEN estado = 'Em análise'  THEN 1 ELSE 0 END) as em_analise,
+            SUM(CASE WHEN estado = 'Aceite'      THEN 1 ELSE 0 END) as aceites,
+            SUM(CASE WHEN estado = 'Rejeitada'   THEN 1 ELSE 0 END) as rejeitadas,
+            SUM(CASE WHEN estado = 'Cancelada'   THEN 1 ELSE 0 END) as canceladas,
+            SUM(CASE WHEN estado IN ('Pendente','Em análise') THEN valor_multa ELSE 0 END) as valor_em_causa,
+            SUM(CASE WHEN estado IN ('Pendente','Em análise')
+                      AND prazo_limite BETWEEN ? AND ? THEN 1 ELSE 0 END) as a_expirar
+        ", [$hoje, $hoje->copy()->addDays(7)])->first();
 
         return [
-            'total'       => Contestacao::count(),
-            'pendentes'   => $pendentes,
-            'emAnalise'   => $emAnalise,
-            'aceites'     => Contestacao::where('estado', 'Aceite')->count(),
-            'rejeitadas'  => Contestacao::where('estado', 'Rejeitada')->count(),
-            'canceladas'  => Contestacao::where('estado', 'Cancelada')->count(),
-            'valorEmCausa'=> (float) Contestacao::whereIn('estado', ['Pendente', 'Em análise'])
-                                ->sum('valor_multa'),
-            'aExpirar'    => Contestacao::whereIn('estado', ['Pendente', 'Em análise'])
-                                ->whereBetween('prazo_limite', [
-                                    Carbon::today(),
-                                    Carbon::today()->addDays(7),
-                                ])
-                                ->count(),
+            'total'        => (int) $row->total,
+            'pendentes'    => (int) $row->pendentes,
+            'emAnalise'    => (int) $row->em_analise,
+            'aceites'      => (int) $row->aceites,
+            'rejeitadas'   => (int) $row->rejeitadas,
+            'canceladas'   => (int) $row->canceladas,
+            'valorEmCausa' => (float) $row->valor_em_causa,
+            'aExpirar'     => (int) $row->a_expirar,
         ];
     }
 
@@ -381,7 +359,6 @@ class GestmulContestacaoController extends Controller
 
     private function parseDataPt(string $data): string
     {
-        // aceita "dd/mm/aaaa" ou "aaaa-mm-dd"
         if (preg_match('#^\d{2}/\d{2}/\d{4}$#', $data)) {
             [$d, $m, $a] = explode('/', $data);
             return "{$a}-{$m}-{$d}";

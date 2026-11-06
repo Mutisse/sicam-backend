@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Models\Multa;
 use App\Models\Patrulha;
 use App\Models\User;
+use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
@@ -42,8 +43,34 @@ class ChefeAgenteController extends Controller
             ->limit(500)
             ->get();
 
-        // Enriquecer com dados de patrulha + multas
-        $items = $agentes->map(fn ($u) => $this->formatar($u));
+        // ⭐ Batch — evita N+1
+        $ids = $agentes->pluck('id')->toArray();
+
+        // Patrulhas em curso (1 query para todos)
+        $patrulhasPorAgente = [];
+        if (!empty($ids)) {
+            $patrulhasPorAgente = Patrulha::whereIn('agente_id', $ids)
+                ->where('estado', 'Em curso')
+                ->orderByDesc('inicio')
+                ->get()
+                ->keyBy('agente_id'); // só a mais recente por agente
+        }
+
+        // Multas emitidas (1 query para todos)
+        $multasPorAgente = [];
+        if (!empty($ids)) {
+            $multasPorAgente = Multa::select('agente_id', DB::raw('COUNT(*) as total'))
+                ->whereIn('agente_id', $ids)
+                ->groupBy('agente_id')
+                ->pluck('total', 'agente_id')
+                ->toArray();
+        }
+
+        $items = $agentes->map(fn ($u) => $this->formatar(
+            $u,
+            $patrulhasPorAgente[$u->id] ?? null,
+            (int) ($multasPorAgente[$u->id] ?? 0),
+        ));
 
         return response()->json([
             'items' => $items,
@@ -57,7 +84,17 @@ class ChefeAgenteController extends Controller
     public function show(int $id)
     {
         $u = User::where('perfil_id', self::PERFIL_AGENTE)->findOrFail($id);
-        return response()->json($this->formatar($u));
+
+        $patrulha = Patrulha::where('agente_id', $u->id)
+            ->where('estado', 'Em curso')
+            ->orderByDesc('inicio')
+            ->first();
+
+        $multasEmitidas = Multa::where('agente_id', $u->id)->count();
+
+        return response()->json(
+            $this->formatar($u, $patrulha, $multasEmitidas),
+        );
     }
 
     /**
@@ -66,29 +103,29 @@ class ChefeAgenteController extends Controller
     public function store(Request $request)
     {
         $dados = $request->validate([
-            'nome'      => 'required|string|max:120',
-            'email'     => 'required|email|unique:users,email',
-            'telefone'  => 'nullable|string|max:30',
-            'nSerie'    => 'required|string|max:60|unique:users,numero_id',
-            'posto'     => 'required|string|max:120',
-            'estado'    => 'nullable|string|in:Online,Em patrulha,Offline,Inactivo',
-            'password'  => 'nullable|string|min:6',
+            'nome'     => 'required|string|max:120',
+            'email'    => 'required|email|unique:users,email',
+            'telefone' => 'nullable|string|max:30',
+            'nSerie'   => 'required|string|max:60|unique:users,numero_id',
+            'posto'    => 'required|string|max:120',
+            'estado'   => 'nullable|string|in:Online,Em patrulha,Offline,Inactivo',
+            'password' => 'nullable|string|min:6',
         ]);
 
         $user = User::create([
-            'name'       => $dados['nome'],
-            'email'      => $dados['email'],
-            'telefone'   => $dados['telefone'] ?? null,
-            'numero_id'  => $dados['nSerie'],
-            'perfil_id'  => self::PERFIL_AGENTE,
-            'posto'      => $dados['posto'],
-            'estado'     => 'Ativo',
-            'password'   => Hash::make($dados['password'] ?? 'sicam123'),
+            'name'      => $dados['nome'],
+            'email'     => $dados['email'],
+            'telefone'  => $dados['telefone'] ?? null,
+            'numero_id' => $dados['nSerie'],
+            'perfil_id' => self::PERFIL_AGENTE,
+            'posto'     => $dados['posto'],
+            'estado'    => 'Ativo',
+            'password'  => Hash::make($dados['password'] ?? 'sicam123'),
         ]);
 
         return response()->json([
             'id'     => (string) $user->id,
-            'agente' => $this->formatar($user),
+            'agente' => $this->formatar($user, null, 0),
         ], 201);
     }
 
@@ -115,9 +152,17 @@ class ChefeAgenteController extends Controller
             'posto'     => $dados['posto'] ?? $u->posto,
         ]);
 
+        // Dados de patrulha e multas (para a resposta)
+        $patrulha = Patrulha::where('agente_id', $u->id)
+            ->where('estado', 'Em curso')
+            ->orderByDesc('inicio')
+            ->first();
+
+        $multasEmitidas = Multa::where('agente_id', $u->id)->count();
+
         return response()->json([
             'id'     => (string) $u->id,
-            'agente' => $this->formatar($u),
+            'agente' => $this->formatar($u, $patrulha, $multasEmitidas),
         ]);
     }
 
@@ -140,9 +185,16 @@ class ChefeAgenteController extends Controller
         $u = User::where('perfil_id', self::PERFIL_AGENTE)->findOrFail($id);
         $u->update(['estado' => 'Ativo']);
 
+        $patrulha = Patrulha::where('agente_id', $u->id)
+            ->where('estado', 'Em curso')
+            ->orderByDesc('inicio')
+            ->first();
+
+        $multasEmitidas = Multa::where('agente_id', $u->id)->count();
+
         return response()->json([
             'id'     => (string) $u->id,
-            'agente' => $this->formatar($u),
+            'agente' => $this->formatar($u, $patrulha, $multasEmitidas),
         ]);
     }
 
@@ -154,9 +206,16 @@ class ChefeAgenteController extends Controller
         $u = User::where('perfil_id', self::PERFIL_AGENTE)->findOrFail($id);
         $u->update(['estado' => 'Inactivo']);
 
+        $patrulha = Patrulha::where('agente_id', $u->id)
+            ->where('estado', 'Em curso')
+            ->orderByDesc('inicio')
+            ->first();
+
+        $multasEmitidas = Multa::where('agente_id', $u->id)->count();
+
         return response()->json([
             'id'     => (string) $u->id,
-            'agente' => $this->formatar($u),
+            'agente' => $this->formatar($u, $patrulha, $multasEmitidas),
         ]);
     }
 
@@ -164,17 +223,11 @@ class ChefeAgenteController extends Controller
     // Helpers
     // ============================================================
 
-    private function formatar(User $u): array
-    {
-        // Patrulha em curso (mais recente)
-        $patrulha = Patrulha::where('agente_id', $u->id)
-            ->where('estado', 'Em curso')
-            ->orderByDesc('inicio')
-            ->first();
-
-        // Multas emitidas por este agente
-        $multasEmitidas = Multa::where('agente_id', $u->id)->count();
-
+    private function formatar(
+        User $u,
+        ?Patrulha $patrulha = null,
+        int $multasEmitidas = 0,
+    ): array {
         // Estado derivado
         $estado = 'Offline';
         if ($patrulha) {
@@ -196,8 +249,8 @@ class ChefeAgenteController extends Controller
             'posto'          => $u->posto ?? '—',
             'estado'         => $estado,
             'ultimaSinc'     => $u->ultimo_acesso
-                                    ? \Carbon\Carbon::parse($u->ultimo_acesso)->format('d/m H:i')
-                                    : '—',
+                ? Carbon::parse($u->ultimo_acesso)->format('d/m H:i')
+                : '—',
             'consultasHoje'  => 0, // stub
             'multasEmitidas' => $multasEmitidas,
             'admissao'       => $u->created_at?->format('d/m/Y') ?? '—',

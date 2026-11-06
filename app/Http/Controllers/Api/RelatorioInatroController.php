@@ -14,8 +14,6 @@ class RelatorioInatroController extends Controller
 {
     /**
      * GET /api/relatorios/inatro/dashboard
-     *
-     * Agregação para a página de Relatórios INATRO.
      */
     public function dashboard(Request $request)
     {
@@ -35,7 +33,7 @@ class RelatorioInatroController extends Controller
     }
 
     // ============================================================
-    // KPIs
+    // KPIs — 3 queries (veículos, inspecções agregadas, a expirar)
     // ============================================================
     private function kpis(?string $provincia, ?string $posto): array
     {
@@ -45,14 +43,21 @@ class RelatorioInatroController extends Controller
 
         $total = (clone $qV)->count();
 
+        // ⭐ 1 query — válidas + expiradas + pendentes
         $qI = Inspecao::query();
         if ($provincia) {
             $qI->whereHas('veiculo', fn ($v) => $v->where('provincia', $provincia));
         }
 
-        $validas   = (clone $qI)->where('estado', 'valida')->count();
-        $expiradas = (clone $qI)->where('estado', 'expirada')->count();
-        $pendentes = (clone $qI)->where('estado', 'pendente')->count();
+        $row = $qI->selectRaw("
+            SUM(CASE WHEN estado = 'valida'   THEN 1 ELSE 0 END) as validas,
+            SUM(CASE WHEN estado = 'expirada' THEN 1 ELSE 0 END) as expiradas,
+            SUM(CASE WHEN estado = 'pendente' THEN 1 ELSE 0 END) as pendentes
+        ")->first();
+
+        $validas   = (int) $row->validas;
+        $expiradas = (int) $row->expiradas;
+        $pendentes = (int) $row->pendentes;
 
         $aExpirar = Inspecao::where('estado', 'valida')
             ->whereBetween('validade', [now(), now()->addDays(30)])
@@ -72,7 +77,7 @@ class RelatorioInatroController extends Controller
     }
 
     // ============================================================
-    // Registos por mês (últimos 6 meses)
+    // Registos por mês
     // ============================================================
     private function registosPorMes(?Carbon $de, ?Carbon $ate, ?string $provincia): array
     {
@@ -144,42 +149,33 @@ class RelatorioInatroController extends Controller
     }
 
     // ============================================================
-    // Top infrações (multas)
+    // Top infrações
     // ============================================================
-   private function topInfracoes(?Carbon $de, ?Carbon $ate): array
-{
-    if (!class_exists(Multa::class)) return [];
+    private function topInfracoes(?Carbon $de, ?Carbon $ate): array
+    {
+        if (!class_exists(Multa::class)) return [];
 
-    $q = Multa::query();
-    if ($de)  $q->where('created_at', '>=', $de);
-    if ($ate) $q->where('created_at', '<=', $ate);
+        $q = Multa::query();
+        if ($de)  $q->where('created_at', '>=', $de);
+        if ($ate) $q->where('created_at', '<=', $ate);
 
-    $total = (clone $q)->count();
-    if ($total === 0) return [];
+        $total = (clone $q)->count();
+        if ($total === 0) return [];
 
-    // Descobrir a coluna automaticamente (a tabela usa 'infracao')
-    $coluna = null;
-    foreach (['infracao', 'tipo', 'motivo', 'descricao'] as $c) {
-        if (Schema::hasColumn('multas', $c)) {
-            $coluna = $c;
-            break;
-        }
+        // Coluna 'infracao' — já existe na tabela multas
+        return $q
+            ->selectRaw("COALESCE(infracao, 'Outra') as tipo, COUNT(*) as total")
+            ->groupBy('tipo')
+            ->orderByDesc('total')
+            ->limit(5)
+            ->get()
+            ->map(fn ($m) => [
+                'tipo'        => $m->tipo,
+                'total'       => (int) $m->total,
+                'percentagem' => round(($m->total / $total) * 100, 1),
+            ])
+            ->toArray();
     }
-    if (!$coluna) return [];
-
-    return $q
-        ->selectRaw("COALESCE({$coluna}, 'Outra') as tipo, COUNT(*) as total")
-        ->groupBy('tipo')
-        ->orderByDesc('total')
-        ->limit(5)
-        ->get()
-        ->map(fn ($m) => [
-            'tipo'        => $m->tipo,
-            'total'       => (int) $m->total,
-            'percentagem' => round(($m->total / $total) * 100, 1),
-        ])
-        ->toArray();
-}
 
     // ============================================================
     // Inspecções por posto

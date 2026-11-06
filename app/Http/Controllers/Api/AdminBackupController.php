@@ -23,22 +23,22 @@ class AdminBackupController extends Controller
             ->map(fn ($b) => $this->formatar($b));
 
         $tipos = BackupTipo::orderBy('id')->get()->map(fn ($t) => [
-            'key'                  => $t->key,
-            'label'                => $t->label,
-            'descricao'            => $t->descricao,
-            'icon'                 => $t->icon,
-            'extensao'             => $t->extensao,
-            'prefixo'              => $t->prefixo,
-            'tamanhoAprox'         => $t->tamanho_aproximado,
-            'periodicidade'        => $t->periodicidade,
-            'horaExecucao'         => $t->hora_execucao,
-            'ativo'                => (bool) $t->ativo,
+            'key'           => $t->key,
+            'label'         => $t->label,
+            'descricao'     => $t->descricao,
+            'icon'          => $t->icon,
+            'extensao'      => $t->extensao,
+            'prefixo'       => $t->prefixo,
+            'tamanhoAprox'  => $t->tamanho_aproximado,
+            'periodicidade' => $t->periodicidade,
+            'horaExecucao'  => $t->hora_execucao,
+            'ativo'         => (bool) $t->ativo,
         ]);
 
         return response()->json([
-            'items'  => $backups,
-            'tipos'  => $tipos,
-            'kpis'   => $this->kpis(),
+            'items' => $backups,
+            'tipos' => $tipos,
+            'kpis'  => $this->kpis(),
         ]);
     }
 
@@ -62,15 +62,15 @@ class AdminBackupController extends Controller
         $ficheiro = "{$cfg->prefixo}_{$dataHoje}_" . now()->format('His') . ".{$cfg->extensao}";
 
         $backup = Backup::create([
-            'codigo'    => $this->gerarCodigo(),
-            'ficheiro'  => $ficheiro,
-            'tipo'      => $dados['tipo'] ?? 'Manual',
-            'origem'    => $dados['origem'],
-            'tamanho'   => $cfg->tamanho_aproximado,
-            'estado'    => 'Concluído',
-            'autor'     => auth()->user()?->name ?? 'sistema',
-            'duracao'   => '3 min 42 s',
-            'criado_por'=> auth()->id(),
+            'codigo'     => $this->gerarCodigo(),
+            'ficheiro'   => $ficheiro,
+            'tipo'       => $dados['tipo'] ?? 'Manual',
+            'origem'     => $dados['origem'],
+            'tamanho'    => $cfg->tamanho_aproximado,
+            'estado'     => 'Concluído',
+            'autor'      => $request->user()?->name ?? 'sistema',
+            'duracao'    => '3 min 42 s',
+            'criado_por' => $request->user()?->id,
         ]);
 
         return response()->json([
@@ -108,15 +108,14 @@ class AdminBackupController extends Controller
         }
 
         return response()->json([
-            'ok'      => true,
-            'backup'  => $this->formatar($b),
+            'ok'       => true,
+            'backup'   => $this->formatar($b),
             'mensagem' => "Restauro iniciado a partir de {$b->codigo}.",
         ]);
     }
 
     /**
      * GET /api/admin/backups/{id}/download
-     * (devolve um ficheiro dummy de texto — em produção viria do disco)
      */
     public function download(int $id)
     {
@@ -161,9 +160,9 @@ class AdminBackupController extends Controller
         ]);
 
         $update = [];
-        if (isset($dados['ativo']))         $update['ativo']          = $dados['ativo'];
-        if (isset($dados['periodicidade'])) $update['periodicidade']  = $dados['periodicidade'];
-        if (isset($dados['horaExecucao']))  $update['hora_execucao']  = $dados['horaExecucao'];
+        if (isset($dados['ativo']))         $update['ativo']         = $dados['ativo'];
+        if (isset($dados['periodicidade'])) $update['periodicidade'] = $dados['periodicidade'];
+        if (isset($dados['horaExecucao']))  $update['hora_execucao'] = $dados['horaExecucao'];
 
         $tipo->update($update);
 
@@ -198,23 +197,35 @@ class AdminBackupController extends Controller
         ];
     }
 
+    /**
+     * KPIs — 3 queries em vez de 5.
+     * (total + ultimo + soma/falhas)
+     */
     private function kpis(): array
     {
-        $ultimo = Backup::orderByDesc('created_at')->first();
+        // 1 query: total, falhas, e última data
+        $row = Backup::selectRaw("
+            COUNT(*) as total,
+            SUM(CASE WHEN estado = 'Falhou' THEN 1 ELSE 0 END) as falhas,
+            MAX(created_at) as ultimo
+        ")->first();
 
-        // Soma tamanhos — pegando o valor em MB/GB
-        $soma = Backup::query()
-            ->where('estado', 'Concluído')
-            ->get()
-            ->sum(function ($b) {
-                return $this->parseTamanhoMB($b->tamanho);
-            });
+        // Soma de tamanhos (precisa de iterar — os tamanhos são texto)
+        $tamanhos = Backup::where('estado', 'Concluído')
+            ->pluck('tamanho');
+
+        $soma = 0;
+        foreach ($tamanhos as $t) {
+            $soma += $this->parseTamanhoMB($t);
+        }
 
         return [
-            'total'    => Backup::count(),
-            'ultimo'   => $ultimo?->created_at?->format('d/m H:i') ?? '—',
-            'tamanho'  => $soma,
-            'falhas'   => Backup::where('estado', 'Falhou')->count(),
+            'total'   => (int) $row->total,
+            'ultimo'  => $row->ultimo
+                ? Carbon::parse($row->ultimo)->format('d/m H:i')
+                : '—',
+            'tamanho' => $soma,
+            'falhas'  => (int) $row->falhas,
         ];
     }
 

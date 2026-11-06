@@ -1,10 +1,12 @@
 <?php
+// app/Http/Controllers/Api/AdminUtilizadorController.php
 
 namespace App\Http\Controllers\Api;
 
 use App\Exports\DadosExport;
 use App\Http\Controllers\Controller;
 use App\Models\User;
+use App\Services\NotificacaoService;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -13,9 +15,6 @@ use Maatwebsite\Excel\Facades\Excel;
 
 class AdminUtilizadorController extends Controller
 {
-    /**
-     * GET /api/admin/utilizadores
-     */
     public function index(Request $request)
     {
         $query = User::query()->with('perfil:id,key,label');
@@ -51,18 +50,12 @@ class AdminUtilizadorController extends Controller
         ]);
     }
 
-    /**
-     * GET /api/admin/utilizadores/{id}
-     */
     public function show(int $id)
     {
         $u = User::with('perfil')->findOrFail($id);
         return response()->json($this->formatar($u));
     }
 
-    /**
-     * POST /api/admin/utilizadores
-     */
     public function store(Request $request)
     {
         $dados = $request->validate([
@@ -76,7 +69,6 @@ class AdminUtilizadorController extends Controller
             'forcarAlteracao'  => 'boolean',
         ]);
 
-        // Encontra o perfil_id a partir da key
         $perfil = DB::table('perfis')->where('key', $dados['perfil'])->first();
         if (!$perfil) {
             return response()->json(['message' => 'Perfil inválido.'], 422);
@@ -101,9 +93,6 @@ class AdminUtilizadorController extends Controller
         ], 201);
     }
 
-    /**
-     * PUT /api/admin/utilizadores/{id}
-     */
     public function update(Request $request, int $id)
     {
         $u = User::findOrFail($id);
@@ -116,6 +105,8 @@ class AdminUtilizadorController extends Controller
             'posto'    => 'sometimes|string|max:120',
             'estado'   => 'sometimes|string|in:Ativo,Bloqueado',
         ]);
+
+        $emailAntigo = $u->email;
 
         $update = [];
         if (isset($dados['nome']))     $update['name']     = $dados['nome'];
@@ -134,6 +125,15 @@ class AdminUtilizadorController extends Controller
 
         $u->update($update);
 
+        if (isset($dados['email']) && $dados['email'] !== $emailAntigo) {
+            $userId    = $u->id;
+            $novoEmail = $u->email;
+
+            dispatch(function () use ($userId, $emailAntigo, $novoEmail) {
+                NotificacaoService::emailAlterado($userId, $emailAntigo, $novoEmail);
+            })->afterResponse();
+        }
+
         return response()->json([
             'id'          => (string) $u->id,
             'utilizador'  => $this->formatar($u->fresh()->load('perfil')),
@@ -141,15 +141,11 @@ class AdminUtilizadorController extends Controller
         ]);
     }
 
-    /**
-     * DELETE /api/admin/utilizadores/{id}
-     */
-    public function destroy(int $id)
+    public function destroy(Request $request, int $id)
     {
         $u = User::findOrFail($id);
 
-        // Não permitir apagar o próprio utilizador
-        if (auth()->id() === $u->id) {
+        if ($request->user()?->id === $u->id) {
             return response()->json([
                 'message' => 'Não pode remover a sua própria conta.',
             ], 422);
@@ -163,14 +159,11 @@ class AdminUtilizadorController extends Controller
         ]);
     }
 
-    /**
-     * PUT /api/admin/utilizadores/{id}/bloquear
-     */
-    public function bloquear(int $id)
+    public function bloquear(Request $request, int $id)
     {
         $u = User::findOrFail($id);
 
-        if (auth()->id() === $u->id) {
+        if ($request->user()?->id === $u->id) {
             return response()->json(['message' => 'Não pode bloquear-se a si próprio.'], 422);
         }
 
@@ -183,9 +176,6 @@ class AdminUtilizadorController extends Controller
         ]);
     }
 
-    /**
-     * PUT /api/admin/utilizadores/{id}/activar
-     */
     public function activar(int $id)
     {
         $u = User::findOrFail($id);
@@ -198,9 +188,6 @@ class AdminUtilizadorController extends Controller
         ]);
     }
 
-    /**
-     * PUT /api/admin/utilizadores/{id}/senha
-     */
     public function alterarSenha(Request $request, int $id)
     {
         $u = User::findOrFail($id);
@@ -212,15 +199,17 @@ class AdminUtilizadorController extends Controller
 
         $u->update(['password' => Hash::make($dados['senha'])]);
 
+        $userId = $u->id;
+        dispatch(function () use ($userId) {
+            NotificacaoService::senhaAlterada($userId);
+        })->afterResponse();
+
         return response()->json([
             'ok' => true,
             'id' => (string) $u->id,
         ]);
     }
 
-    /**
-     * GET /api/admin/utilizadores/xlsx
-     */
     public function xlsx(Request $request)
     {
         $items = User::with('perfil')->orderBy('name')->limit(1000)->get();
@@ -241,10 +230,6 @@ class AdminUtilizadorController extends Controller
             'admin-utilizadores-' . date('Y-m-d') . '.xlsx',
         );
     }
-
-    // ============================================================
-    // Helpers
-    // ============================================================
 
     private function formatar(User $u): array
     {
@@ -267,7 +252,6 @@ class AdminUtilizadorController extends Controller
 
     private function kpis(): array
     {
-        // Online = utilizadores com acesso nos últimos 15 minutos
         $limite = Carbon::now()->subMinutes(15);
 
         return [
@@ -306,7 +290,6 @@ class AdminUtilizadorController extends Controller
 
     private function gerarNumeroId(string $perfilKey): string
     {
-        // Prefixo conforme o perfil
         $prefixo = match ($perfilKey) {
             'admin'   => 'SICAM-ADM',
             'chefe'   => 'PRM-CHF',
@@ -319,7 +302,6 @@ class AdminUtilizadorController extends Controller
             default   => 'USR',
         };
 
-        // Sequência — último número deste prefixo
         $ultimo = User::where('numero_id', 'like', "{$prefixo}-%")
             ->orderByDesc('id')
             ->value('numero_id');

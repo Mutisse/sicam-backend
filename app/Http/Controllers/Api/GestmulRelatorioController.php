@@ -32,18 +32,24 @@ class GestmulRelatorioController extends Controller
             ? $request->provincia
             : null;
 
+        $desempenho = $this->desempenhoProvincia($de, $ate);
+
         return response()->json([
             'periodo' => [
                 'de'        => $de->format('Y-m-d'),
                 'ate'       => $ate->format('Y-m-d'),
                 'provincia' => $provincia ?? 'Todas',
             ],
-            'kpis'                 => $this->kpis($de, $ate, $provincia),
-            'cobrancaMensal'       => $this->cobrancaMensal(),
-            'topInfracoes'         => $this->topInfracoes($de, $ate, $provincia),
-            'topMetodos'           => $this->topMetodos($de, $ate),
-            'desempenhoProvincia'  => $this->desempenhoProvincia($de, $ate),
-            'totaisProvincias'     => $this->totaisProvincias($de, $ate),
+            'kpis'                => $this->kpis($de, $ate, $provincia),
+            'cobrancaMensal'      => $this->cobrancaMensal(),
+            'topInfracoes'        => $this->topInfracoes($de, $ate, $provincia),
+            'topMetodos'          => $this->topMetodos($de, $ate),
+            'desempenhoProvincia' => $desempenho,
+            'totaisProvincias'    => [
+                'emitidas' => array_sum(array_column($desempenho, 'emitidas')),
+                'pagas'    => array_sum(array_column($desempenho, 'pagas')),
+                'cobrado'  => array_sum(array_column($desempenho, 'cobrado')),
+            ],
         ]);
     }
 
@@ -111,82 +117,81 @@ class GestmulRelatorioController extends Controller
     // Helpers
     // ============================================================
 
-    private function baseMultas(Carbon $de, Carbon $ate, ?string $provincia = null)
-    {
-        $q = Multa::query()->whereBetween('data', [$de->toDateString(), $ate->toDateString()]);
-        if ($provincia) $q->where('provincia', $provincia);
-        return $q;
-    }
-
-    private function baseRecibos(Carbon $de, Carbon $ate)
-    {
-        return Recibo::query()->whereBetween('created_at', [$de, $ate]);
-    }
-
     private function kpis(Carbon $de, Carbon $ate, ?string $provincia): array
     {
-        $multas = $this->baseMultas($de, $ate, $provincia);
+        // ── 1 query — agregados de multas ──
+        $m = Multa::query()
+            ->whereBetween('data', [$de->toDateString(), $ate->toDateString()])
+            ->when($provincia, fn ($q) => $q->where('provincia', $provincia))
+            ->selectRaw("
+                COUNT(*) as emitidas,
+                SUM(CASE WHEN estado = 'Paga'       THEN 1 ELSE 0 END) as pagas,
+                SUM(CASE WHEN estado = 'Pendente'   THEN 1 ELSE 0 END) as pendentes,
+                SUM(CASE WHEN estado = 'Contestada' THEN 1 ELSE 0 END) as contestadas,
+                SUM(CASE WHEN estado = 'Pendente'   THEN valor ELSE 0 END) as pendente_valor
+            ")->first();
 
-        $emitidas     = (clone $multas)->count();
-        $pagas        = (clone $multas)->where('estado', 'Paga')->count();
-        $pendentes    = (clone $multas)->where('estado', 'Pendente')->count();
-        $contestadas  = (clone $multas)->where('estado', 'Contestada')->count();
+        // ── 1 query — agregados de recibos ──
+        $r = Recibo::query()
+            ->whereBetween('created_at', [$de, $ate])
+            ->when($provincia, fn ($q) =>
+                $q->whereHas('multa', fn ($mm) => $mm->where('provincia', $provincia))
+            )
+            ->selectRaw("
+                COUNT(*) as total,
+                SUM(CASE WHEN estado = 'Confirmado' THEN valor ELSE 0 END) as cobrado,
+                SUM(valor) as valor_total
+            ")->first();
 
-        $pendenteValor = (float) (clone $multas)->where('estado', 'Pendente')->sum('valor');
-
-        // Cobrado — soma dos recibos confirmados
-        $recibos = $this->baseRecibos($de, $ate);
-
-        if ($provincia) {
-            $recibos->whereHas('multa', fn ($m) => $m->where('provincia', $provincia));
-        }
-
-        $cobrado = (float) (clone $recibos)->where('estado', 'Confirmado')->sum('valor');
-        $totalRecibos = (clone $recibos)->count();
-
-        $ticketMedio = $totalRecibos > 0
-            ? round((float) (clone $recibos)->sum('valor') / $totalRecibos)
-            : 0;
-
-        $taxaCobranca = $emitidas > 0
-            ? round(($pagas / $emitidas) * 100, 1)
-            : 0;
+        $emitidas = (int) $m->emitidas;
+        $pagas    = (int) $m->pagas;
+        $totalR   = (int) $r->total;
 
         return [
             'emitidas'      => $emitidas,
             'pagas'         => $pagas,
-            'pendentes'     => $pendentes,
-            'contestadas'   => $contestadas,
-            'cobrado'       => $cobrado,
-            'pendenteValor' => $pendenteValor,
-            'ticketMedio'   => $ticketMedio,
-            'taxaCobranca'  => $taxaCobranca,
+            'pendentes'     => (int) $m->pendentes,
+            'contestadas'   => (int) $m->contestadas,
+            'cobrado'       => (float) $r->cobrado,
+            'pendenteValor' => (float) $m->pendente_valor,
+            'ticketMedio'   => $totalR > 0 ? round((float) $r->valor_total / $totalR) : 0,
+            'taxaCobranca'  => $emitidas > 0 ? round(($pagas / $emitidas) * 100, 1) : 0,
         ];
     }
 
+    /**
+     * Cobrança mensal — 2 queries (GROUP BY mês), independente do nº de meses.
+     */
     private function cobrancaMensal(): array
     {
+        $inicio = Carbon::today()->subMonths(5)->startOfMonth();
+        $fim    = Carbon::today()->endOfMonth();
+
+        // 1 query — multas emitidas por mês
+        $emitidasPorMes = Multa::query()
+            ->whereBetween('data', [$inicio->toDateString(), $fim->toDateString()])
+            ->selectRaw("DATE_FORMAT(data, '%Y-%m') as ym, COUNT(*) as total")
+            ->groupBy('ym')
+            ->pluck('total', 'ym');
+
+        // 1 query — cobrado por mês
+        $cobradoPorMes = Recibo::query()
+            ->whereBetween('created_at', [$inicio, $fim])
+            ->where('estado', 'Confirmado')
+            ->selectRaw("DATE_FORMAT(created_at, '%Y-%m') as ym, SUM(valor) as total")
+            ->groupBy('ym')
+            ->pluck('total', 'ym');
+
         $resultado = [];
-
-        for ($i = 5; $i >= 0; $i--) {
-            $data = Carbon::today()->subMonths($i);
-            $ini  = $data->copy()->startOfMonth();
-            $fim  = $data->copy()->endOfMonth();
-
-            $emitidas = Multa::whereBetween('data', [
-                $ini->toDateString(),
-                $fim->toDateString(),
-            ])->count();
-
-            $cobrado = (float) Recibo::whereBetween('created_at', [$ini, $fim])
-                ->where('estado', 'Confirmado')
-                ->sum('valor');
-
+        $cursor = $inicio->copy();
+        while ($cursor->lte($fim)) {
+            $ym = $cursor->format('Y-m');
             $resultado[] = [
-                'mes'      => mb_strtoupper($data->locale('pt')->isoFormat('MMM')),
-                'emitidas' => $emitidas,
-                'cobrado'  => round($cobrado / 1000, 1), // mil MT
+                'mes'      => mb_strtoupper($cursor->locale('pt')->isoFormat('MMM')),
+                'emitidas' => (int) ($emitidasPorMes[$ym] ?? 0),
+                'cobrado'  => round((float) ($cobradoPorMes[$ym] ?? 0) / 1000, 1),
             ];
+            $cursor->addMonth();
         }
 
         return $resultado;
@@ -194,16 +199,16 @@ class GestmulRelatorioController extends Controller
 
     private function topInfracoes(Carbon $de, Carbon $ate, ?string $provincia): array
     {
-        $query = Multa::query()
+        $itens = Multa::query()
             ->select('infracao', DB::raw('COUNT(*) as total'))
             ->whereBetween('data', [$de->toDateString(), $ate->toDateString()])
+            ->when($provincia, fn ($q) => $q->where('provincia', $provincia))
             ->groupBy('infracao')
-            ->orderByDesc('total');
+            ->orderByDesc('total')
+            ->limit(6)
+            ->get();
 
-        if ($provincia) $query->where('provincia', $provincia);
-
-        $itens = $query->limit(6)->get();
-        $soma  = $itens->sum('total') ?: 1;
+        $soma = $itens->sum('total') ?: 1;
 
         return $itens->map(fn ($i) => [
             'nome'        => $i->infracao,
@@ -237,8 +242,8 @@ class GestmulRelatorioController extends Controller
             ->select(
                 'provincia',
                 DB::raw('COUNT(*) as emitidas'),
-                DB::raw('SUM(CASE WHEN estado = "Paga" THEN 1 ELSE 0 END) as pagas'),
-                DB::raw('SUM(CASE WHEN estado = "Paga" THEN valor ELSE 0 END) as cobrado')
+                DB::raw("SUM(CASE WHEN estado = 'Paga' THEN 1 ELSE 0 END) as pagas"),
+                DB::raw("SUM(CASE WHEN estado = 'Paga' THEN valor ELSE 0 END) as cobrado")
             )
             ->whereBetween('data', [$de->toDateString(), $ate->toDateString()])
             ->groupBy('provincia')
@@ -258,16 +263,5 @@ class GestmulRelatorioController extends Controller
                 'taxa'      => $taxa,
             ];
         })->toArray();
-    }
-
-    private function totaisProvincias(Carbon $de, Carbon $ate): array
-    {
-        $linhas = $this->desempenhoProvincia($de, $ate);
-
-        return [
-            'emitidas' => array_sum(array_column($linhas, 'emitidas')),
-            'pagas'    => array_sum(array_column($linhas, 'pagas')),
-            'cobrado'  => array_sum(array_column($linhas, 'cobrado')),
-        ];
     }
 }

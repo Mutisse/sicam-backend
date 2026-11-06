@@ -17,34 +17,15 @@ class AdminRelatoriosOperacoesController extends Controller
      */
     public function index(Request $request)
     {
-        $de = $request->filled('de')
-            ? Carbon::parse($request->de)->startOfDay()
-            : null;
-
-        $ate = $request->filled('ate')
-            ? Carbon::parse($request->ate)->endOfDay()
-            : null;
-
-        $filtroPosto = $request->input('posto', '');
-
-        return response()->json([
-            'periodo' => [
-                'de'  => $de?->format('Y-m-d'),
-                'ate' => $ate?->format('Y-m-d'),
-            ],
-            'kpis'       => $this->kpis($de, $ate, $filtroPosto),
-            'serieDias'  => $this->serieDias($de, $ate, $filtroPosto),
-            'porPosto'   => $this->operacoesPorPosto($de, $ate, $filtroPosto),
-            'distEstado' => $this->distribuicaoEstado($de, $ate, $filtroPosto),
-            'operacoes'  => $this->operacoes($de, $ate, $filtroPosto),
-            'viaturas'   => $this->viaturas($de, $ate, $filtroPosto),
-            'postos'     => $this->postos(),
-        ]);
+        return response()->json($this->dados($request));
     }
 
+    /**
+     * GET /api/admin/relatorios/operacoes/xlsx
+     */
     public function xlsx(Request $request)
     {
-        $dados = $this->index($request)->getData(true);
+        $dados = $this->dados($request);
 
         $cabecalhos = ['Código', 'Turno', 'Viatura', 'Posto', 'Início', 'Estado'];
         $linhas = collect($dados['operacoes'])->map(fn ($o) => [
@@ -62,9 +43,12 @@ class AdminRelatoriosOperacoesController extends Controller
         );
     }
 
+    /**
+     * GET /api/admin/relatorios/operacoes/pdf
+     */
     public function pdf(Request $request)
     {
-        $dados = $this->index($request)->getData(true);
+        $dados = $this->dados($request);
 
         $cabecalhos = ['Código', 'Turno', 'Viatura', 'Posto', 'Início', 'Estado'];
         $linhas = collect($dados['operacoes'])->map(fn ($o) => [
@@ -97,6 +81,36 @@ class AdminRelatoriosOperacoesController extends Controller
     }
 
     // ============================================================
+    // Núcleo — calcula os dados uma vez
+    // ============================================================
+    private function dados(Request $request): array
+    {
+        $de = $request->filled('de')
+            ? Carbon::parse($request->de)->startOfDay()
+            : null;
+
+        $ate = $request->filled('ate')
+            ? Carbon::parse($request->ate)->endOfDay()
+            : null;
+
+        $filtroPosto = $request->input('posto', '');
+
+        return [
+            'periodo' => [
+                'de'  => $de?->format('Y-m-d'),
+                'ate' => $ate?->format('Y-m-d'),
+            ],
+            'kpis'       => $this->kpis($de, $ate, $filtroPosto),
+            'serieDias'  => $this->serieDias($de, $ate, $filtroPosto),
+            'porPosto'   => $this->operacoesPorPosto($de, $ate, $filtroPosto),
+            'distEstado' => $this->distribuicaoEstado($de, $ate, $filtroPosto),
+            'operacoes'  => $this->operacoes($de, $ate, $filtroPosto),
+            'viaturas'   => $this->viaturas($de, $ate, $filtroPosto),
+            'postos'     => $this->postos(),
+        ];
+    }
+
+    // ============================================================
     // Helpers
     // ============================================================
 
@@ -116,13 +130,22 @@ class AdminRelatoriosOperacoesController extends Controller
         return $q;
     }
 
+    /**
+     * KPIs — 1 query em vez de 3.
+     */
     private function kpis($de, $ate, string $posto): array
     {
-        $total      = (clone $this->base($de, $ate, $posto))->count();
-        $concluidas = (clone $this->base($de, $ate, $posto))
-            ->where('estado', 'Concluída')->count();
-        $canceladas = (clone $this->base($de, $ate, $posto))
-            ->where('estado', 'Cancelada')->count();
+        $row = (clone $this->base($de, $ate, $posto))
+            ->selectRaw("
+                COUNT(*) as total,
+                SUM(CASE WHEN estado = 'Concluída' THEN 1 ELSE 0 END) as concluidas,
+                SUM(CASE WHEN estado = 'Cancelada' THEN 1 ELSE 0 END) as canceladas
+            ")
+            ->first();
+
+        $total      = (int) $row->total;
+        $concluidas = (int) $row->concluidas;
+        $canceladas = (int) $row->canceladas;
         $taxa       = $total > 0 ? round(($concluidas / $total) * 100, 1) : 0;
 
         return [
@@ -227,13 +250,14 @@ class AdminRelatoriosOperacoesController extends Controller
 
     private function viaturas($de, $ate, string $posto): array
     {
+        // ⭐ Aspas simples no CASE (não duplas)
         $rows = (clone $this->base($de, $ate, $posto))
             ->leftJoin('postos', 'postos.id', '=', 'patrulhas.posto_id')
             ->select(
                 'patrulhas.viatura',
                 'postos.nome as posto_nome',
                 DB::raw('COUNT(*) as total'),
-                DB::raw('SUM(CASE WHEN patrulhas.estado = "Concluída" THEN 1 ELSE 0 END) as concluidas')
+                DB::raw("SUM(CASE WHEN patrulhas.estado = 'Concluída' THEN 1 ELSE 0 END) as concluidas")
             )
             ->whereNotNull('patrulhas.viatura')
             ->where('patrulhas.viatura', '!=', '')

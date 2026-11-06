@@ -9,7 +9,6 @@ use App\Models\Veiculo;
 use Barryvdh\DomPDF\Facade\Pdf;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\DB;
 use Maatwebsite\Excel\Facades\Excel;
 
 class IssmApoliceController extends Controller
@@ -70,18 +69,28 @@ class IssmApoliceController extends Controller
             'email'       => 'nullable|email|max:120',
             'seguradora'  => 'required|string|max:120',
             'tipo'        => 'required|string|max:60',
-            'inicio'      => 'required|string',
-            'fim'         => 'required|string',
-            'premio'      => 'required|integer|min:0',
+            'inicio'      => 'required|date',
+            'fim'         => 'required|date|after:inicio',
+            'premio'      => 'required|numeric|min:0',
             'estado'      => 'nullable|string|in:Activa,A expirar,Expirada,Anulada',
             'observacoes' => 'nullable|string',
         ]);
 
-        // Resolver/criar veículo pela matrícula
-        $veiculo = Veiculo::firstOrCreate(
-            ['matricula' => strtoupper($dados['matricula'])],
-            ['estado' => 'sem-dados'],
-        );
+        // Veículo TEM de existir — não criamos veículos incompletos.
+        $veiculo = Veiculo::where('matricula', strtoupper($dados['matricula']))->first();
+        if (!$veiculo) {
+            return response()->json([
+                'message' => 'Veículo não registado. Registe o veículo antes de criar a apólice.',
+            ], 422);
+        }
+
+        $inicio = $this->parseData($dados['inicio']);
+        $fim    = $this->parseData($dados['fim']);
+        if (!$inicio || !$fim) {
+            return response()->json(['message' => 'Datas inválidas.'], 422);
+        }
+
+        $estado = $this->calcularEstado($inicio, $fim, $dados['estado'] ?? null);
 
         $a = Apolice::create([
             'numero'      => $dados['numero'],
@@ -92,10 +101,10 @@ class IssmApoliceController extends Controller
             'email'       => $dados['email'] ?? null,
             'seguradora'  => $dados['seguradora'],
             'tipo'        => $dados['tipo'],
-            'inicio'      => $this->parseData($dados['inicio']),
-            'validade'    => $this->parseData($dados['fim']),
+            'inicio'      => $inicio,
+            'validade'    => $fim,
             'premio'      => $dados['premio'],
-            'estado'      => $dados['estado'] ?? 'Activa',
+            'estado'      => $estado,
             'observacoes' => $dados['observacoes'] ?? null,
         ]);
 
@@ -120,24 +129,57 @@ class IssmApoliceController extends Controller
             'email'       => 'nullable|email|max:120',
             'seguradora'  => 'sometimes|string|max:120',
             'tipo'        => 'sometimes|string|max:60',
-            'inicio'      => 'sometimes|string',
-            'fim'         => 'sometimes|string',
-            'premio'      => 'sometimes|integer|min:0',
+            'inicio'      => 'sometimes|date',
+            'fim'         => 'sometimes|date',
+            'premio'      => 'sometimes|numeric|min:0',
             'estado'      => 'sometimes|string|in:Activa,A expirar,Expirada,Anulada',
             'observacoes' => 'nullable|string',
         ]);
 
         if (isset($dados['matricula'])) {
-            $veiculo = Veiculo::firstOrCreate(
-                ['matricula' => strtoupper($dados['matricula'])],
-                ['estado' => 'sem-dados'],
-            );
+            $veiculo = Veiculo::where('matricula', strtoupper($dados['matricula']))->first();
+            if (!$veiculo) {
+                return response()->json([
+                    'message' => 'Veículo não registado. Registe o veículo antes de associar a apólice.',
+                ], 422);
+            }
             $dados['veiculo_id'] = $veiculo->id;
             unset($dados['matricula']);
         }
-        if (isset($dados['inicio'])) $dados['inicio'] = $this->parseData($dados['inicio']);
-        if (isset($dados['fim']))    $dados['validade'] = $this->parseData($dados['fim']);
-        unset($dados['fim']);
+
+        if (isset($dados['inicio'])) {
+            $inicio = $this->parseData($dados['inicio']);
+            if (!$inicio) {
+                return response()->json(['message' => 'Data de início inválida.'], 422);
+            }
+            $dados['inicio'] = $inicio;
+        }
+        if (isset($dados['fim'])) {
+            $fim = $this->parseData($dados['fim']);
+            if (!$fim) {
+                return response()->json(['message' => 'Data de fim inválida.'], 422);
+            }
+            $dados['validade'] = $fim;
+            unset($dados['fim']);
+        }
+
+        // Recalcular estado se as datas mudaram (excepto se 'Anulada' explícita)
+        if (isset($dados['inicio']) || isset($dados['validade'])) {
+            $inicioFinal = $dados['inicio']  ?? $a->inicio;
+            $fimFinal    = $dados['validade'] ?? $a->validade;
+
+            if ($fimFinal->lt($inicioFinal)) {
+                return response()->json(['message' => 'Data de fim anterior à de início.'], 422);
+            }
+
+            if (($dados['estado'] ?? $a->estado) !== 'Anulada') {
+                $dados['estado'] = $this->calcularEstado(
+                    $inicioFinal,
+                    $fimFinal,
+                    $dados['estado'] ?? null
+                );
+            }
+        }
 
         $a->update($dados);
 
@@ -226,10 +268,10 @@ class IssmApoliceController extends Controller
             'cabecalhos'  => $cabecalhos,
             'linhas'      => $linhas,
             'resumo'      => [
-                'Total'      => $items->count(),
-                'Activas'    => $items->where('estado', 'Activa')->count(),
-                'A expirar'  => $items->where('estado', 'A expirar')->count(),
-                'Expiradas'  => $items->where('estado', 'Expirada')->count(),
+                'Total'     => $items->count(),
+                'Activas'   => $items->where('estado', 'Activa')->count(),
+                'A expirar' => $items->where('estado', 'A expirar')->count(),
+                'Expiradas' => $items->where('estado', 'Expirada')->count(),
             ],
             'geradoEm'    => now()->format('d/m/Y H:i'),
         ])->setPaper('a4', 'landscape');
@@ -259,22 +301,34 @@ class IssmApoliceController extends Controller
             'tipo'        => $a->tipo,
             'inicio'      => $a->inicio?->format('d/m/Y') ?? '—',
             'fim'         => $a->validade?->format('d/m/Y') ?? '—',
-            'premio'      => (int) $a->premio,
+            'premio'      => (float) $a->premio,
             'estado'      => $a->estado,
             'observacoes' => $a->observacoes,
             'criadoEm'    => $a->created_at?->format('d/m/Y H:i') ?? '—',
         ];
     }
 
+    /**
+     * KPIs — 1 query com SUM(CASE WHEN)
+     */
     private function kpis(): array
     {
+        $r = Apolice::selectRaw("
+            COUNT(*) as total,
+            SUM(CASE WHEN estado = 'Activa'    THEN 1 ELSE 0 END) as activas,
+            SUM(CASE WHEN estado = 'A expirar' THEN 1 ELSE 0 END) as a_expirar,
+            SUM(CASE WHEN estado = 'Expirada'  THEN 1 ELSE 0 END) as expiradas,
+            SUM(CASE WHEN estado = 'Anulada'   THEN 1 ELSE 0 END) as anuladas,
+            SUM(premio) as premio_total
+        ")->first();
+
         return [
-            'total'      => Apolice::count(),
-            'activas'    => Apolice::where('estado', 'Activa')->count(),
-            'aExpirar'   => Apolice::where('estado', 'A expirar')->count(),
-            'expiradas'  => Apolice::where('estado', 'Expirada')->count(),
-            'anuladas'   => Apolice::where('estado', 'Anulada')->count(),
-            'premioTotal'=> Apolice::sum('premio'),
+            'total'       => (int) $r->total,
+            'activas'     => (int) $r->activas,
+            'aExpirar'    => (int) $r->a_expirar,
+            'expiradas'   => (int) $r->expiradas,
+            'anuladas'    => (int) $r->anuladas,
+            'premioTotal' => (float) $r->premio_total,
         ];
     }
 
@@ -289,11 +343,45 @@ class IssmApoliceController extends Controller
         return $query->orderByDesc('created_at')->limit(500)->get();
     }
 
-    private function parseData(string $data): Carbon
+    /**
+     * Parse tolerante de datas: aceita `Y-m-d` e `d/m/Y`.
+     * Devolve null se inválida (em vez de rebentar).
+     */
+    private function parseData(?string $data): ?Carbon
     {
-        if (preg_match('#^(\d{2})/(\d{2})/(\d{4})$#', $data, $m)) {
-            $data = "{$m[3]}-{$m[2]}-{$m[1]}";
+        if (!$data) return null;
+
+        try {
+            if (preg_match('#^(\d{2})/(\d{2})/(\d{4})$#', $data, $m)) {
+                $data = "{$m[3]}-{$m[2]}-{$m[1]}";
+            }
+            return Carbon::parse($data);
+        } catch (\Exception $e) {
+            return null;
         }
-        return Carbon::parse($data);
+    }
+
+    /**
+     * Calcula estado com base nas datas.
+     * 'Anulada' explícita prevalece sobre o cálculo.
+     */
+    private function calcularEstado(Carbon $inicio, Carbon $fim, ?string $estadoManual = null): string
+    {
+        if ($estadoManual === 'Anulada') {
+            return 'Anulada';
+        }
+
+        $hoje = now()->startOfDay();
+
+        if ($fim->lt($hoje)) {
+            return 'Expirada';
+        }
+        if ($inicio->gt($hoje)) {
+            return 'A expirar';  // ainda não começou
+        }
+        if ($fim->diffInDays($hoje) <= 30) {
+            return 'A expirar';  // expira nos próximos 30 dias
+        }
+        return 'Activa';
     }
 }

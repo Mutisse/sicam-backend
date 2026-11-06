@@ -7,6 +7,7 @@ use App\Models\Alerta;
 use App\Models\Contestacao;
 use App\Models\Multa;
 use App\Models\Recibo;
+use App\Services\NotificacaoService;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
@@ -19,17 +20,17 @@ class AdminMonitorizacaoController extends Controller
      */
     public function index()
     {
-        $recursos     = $this->recursos();
-        $integracoes  = $this->integracoes();
-        $metricas     = $this->metricas();
-        $alertas      = $this->alertas();
+        $recursos    = $this->recursos();
+        $integracoes = $this->integracoes();
+        $metricas    = $this->metricas();
+        $alertas     = $this->alertas();
 
         return response()->json([
-            'recursos'    => $recursos,
-            'integracoes' => $integracoes,
-            'metricas'    => $metricas,
-            'alertas'     => $alertas,
-            'estadoGeral' => $this->estadoGeral($recursos, $integracoes, $alertas),
+            'recursos'      => $recursos,
+            'integracoes'   => $integracoes,
+            'metricas'      => $metricas,
+            'alertas'       => $alertas,
+            'estadoGeral'   => $this->estadoGeral($recursos, $integracoes, $alertas),
             'actualizadoEm' => now()->format('H:i:s'),
         ]);
     }
@@ -63,7 +64,6 @@ class AdminMonitorizacaoController extends Controller
      */
     public function reiniciarIntegracao(string $nome)
     {
-        // Limpa a cache de health-check deste serviço
         Cache::forget("monitor:ping:{$nome}");
         Cache::forget("monitor:latencia:{$nome}");
 
@@ -92,7 +92,6 @@ class AdminMonitorizacaoController extends Controller
             $load = sys_getloadavg();
             $load1 = $load[0] ?? 0;
 
-            // assume 1 core (ajusta se souberes o nº de cores)
             $cores = 1;
             if (PHP_OS_FAMILY === 'Windows') {
                 $cores = (int) (shell_exec('echo %NUMBER_OF_PROCESSORS%') ?? 1);
@@ -121,7 +120,6 @@ class AdminMonitorizacaoController extends Controller
             ];
         }
 
-        // fallback — Windows sem sys_getloadavg
         return [
             'key'           => 'cpu',
             'label'         => 'CPU',
@@ -141,8 +139,6 @@ class AdminMonitorizacaoController extends Controller
     {
         $nivel = 'regular';
 
-        // PHP memory_get_usage devolve memória DO PROCESSO, não do sistema todo
-        // Para RAM do sistema, usa OS-specific:
         $usadoMb = 0;
         $totalMb = 0;
 
@@ -163,7 +159,7 @@ class AdminMonitorizacaoController extends Controller
         } else {
             $out = @file_get_contents('/proc/meminfo');
             if ($out) {
-                if (preg_match('/MemTotal:\s+(\d+)/', $out, $m))   $totalKb = (int) $m[1];
+                if (preg_match('/MemTotal:\s+(\d+)/', $out, $m))    $totalKb = (int) $m[1];
                 if (preg_match('/MemAvailable:\s+(\d+)/', $out, $m)) $livreKb = (int) $m[1];
                 if (isset($livreKb, $totalKb) && $totalKb > 0) {
                     $usadoMb = (int) round(($totalKb - $livreKb) / 1024);
@@ -199,7 +195,6 @@ class AdminMonitorizacaoController extends Controller
         $total = @disk_total_space('/');
         $livre = @disk_free_space('/');
 
-        // Windows: usa a drive onde está o projecto
         if ((!$total || !$livre) && PHP_OS_FAMILY === 'Windows') {
             $total = @disk_total_space('C:');
             $livre = @disk_free_space('C:');
@@ -235,17 +230,14 @@ class AdminMonitorizacaoController extends Controller
 
     private function latencia(): array
     {
-        // Latência = média do tempo de resposta das últimas X requests
-        // Guardamos em cache no middleware (ver nota abaixo)
         $amostras = Cache::get('monitor:latencia_amostras', []);
         $media = count($amostras) > 0 ? (int) round(array_sum($amostras) / count($amostras)) : 0;
 
         $nivel = 'regular';
-        // limiares em ms
         if ($media >= 800) $nivel = 'critico';
         elseif ($media >= 400) $nivel = 'atencao';
 
-        $percent = min(100, (int) round($media / 10)); // escala ms→% (1000ms = 100%)
+        $percent = min(100, (int) round($media / 10));
 
         return [
             'key'           => 'latencia',
@@ -262,7 +254,6 @@ class AdminMonitorizacaoController extends Controller
         ];
     }
 
-    // Guarda histórico (últimos 10 valores) em cache
     private function historico(string $key, int $valor): array
     {
         $cacheKey = "monitor:hist:{$key}";
@@ -278,7 +269,7 @@ class AdminMonitorizacaoController extends Controller
     }
 
     // ============================================================
-    // INTEGRAÇÕES — health-check real
+    // INTEGRAÇÕES — health-check real + gatilho de falha
     // ============================================================
 
     private function integracoes(): array
@@ -290,25 +281,19 @@ class AdminMonitorizacaoController extends Controller
             ['nome' => 'ISSM / Seguradoras', 'descricao' => 'Seguro obrigatório',              'icon' => 'verified_user',  'rota' => '/api/relatorios/issm'],
         ];
 
-        // Filtra serviços internos cujo controller/módulo pode não existir
-        // Neste caso, em vez de fazer ping HTTP (bloqueante), usamos a BD como "proxy de saúde"
         $resultado = [];
 
         foreach ($servicos as $s) {
-            $cacheKey = "monitor:ping:{$s['nome']}";
             $inicio = microtime(true);
-
             $ok = true;
-            $latencia = 0;
+            $mensagemErro = null;
 
             try {
-                // Verifica se o recurso responde consultando BD do módulo
                 switch ($s['nome']) {
                     case 'INATRO':
                         \App\Models\Veiculo::query()->limit(1)->count();
                         break;
                     case 'PRM':
-                        // Se existir modelo Hotlist — senão considera OK
                         if (class_exists(\App\Models\Hotlist::class)) {
                             \App\Models\Hotlist::query()->limit(1)->count();
                         }
@@ -324,15 +309,35 @@ class AdminMonitorizacaoController extends Controller
                         }
                         break;
                 }
-                $latencia = (int) round((microtime(true) - $inicio) * 1000);
             } catch (\Throwable $e) {
                 $ok = false;
-                $latencia = 0;
+                $mensagemErro = $e->getMessage();
             }
+
+            $latencia = (int) round((microtime(true) - $inicio) * 1000);
 
             $estado = 'regular';
             if (!$ok || $latencia >= 800) $estado = 'critico';
             elseif ($latencia >= 400) $estado = 'atencao';
+
+            // ═══════════════════════════════════════════════════════
+            // 🔔 GATILHO — Falha de integração
+            //    Só notifica quando o serviço FALHA (não em latência alta).
+            //    Anti-spam: 1x por serviço a cada 10 min.
+            // ═══════════════════════════════════════════════════════
+            if (!$ok) {
+                $nomeServico = $s['nome'];
+                $erro        = $mensagemErro ?? 'Erro desconhecido';
+
+                dispatch(function () use ($nomeServico, $erro) {
+                    $chave = "notificar.falha.{$nomeServico}";
+                    if (Cache::has($chave)) return;
+
+                    Cache::put($chave, true, now()->addMinutes(10));
+
+                    NotificacaoService::falhaIntegracao($nomeServico, $erro);
+                })->afterResponse();
+            }
 
             $resultado[] = [
                 'nome'           => $s['nome'],
@@ -353,37 +358,35 @@ class AdminMonitorizacaoController extends Controller
     // ============================================================
 
     private function metricas(): array
-{
-    // Guardar como STRING (não como objeto Carbon) para evitar __PHP_Incomplete_Class
-    $inicioStr = Cache::get('monitor:boot_at_str');
+    {
+        $inicioStr = Cache::get('monitor:boot_at_str');
 
-    if (!$inicioStr || !is_string($inicioStr)) {
-        $inicioStr = now()->toIso8601String();
-        Cache::put('monitor:boot_at_str', $inicioStr, 86400);
+        if (!$inicioStr || !is_string($inicioStr)) {
+            $inicioStr = now()->toIso8601String();
+            Cache::put('monitor:boot_at_str', $inicioStr, 86400);
+        }
+
+        try {
+            $inicio = Carbon::parse($inicioStr);
+        } catch (\Throwable $e) {
+            $inicio = now();
+            Cache::put('monitor:boot_at_str', $inicio->toIso8601String(), 86400);
+        }
+
+        $seg   = max(0, $inicio->diffInSeconds(now(), false) * -1);
+        $dias  = floor($seg / 86400);
+        $horas = floor(($seg % 86400) / 3600);
+        $min   = floor(($seg % 3600) / 60);
+
+        return [
+            'uptime'      => "{$dias}d {$horas}h {$min}m",
+            'uptimeDesde' => $inicio->format('d/m H:i'),
+            'pedidosMin'  => (int) Cache::get('monitor:req_last_min', 0),
+            'picoPedidos' => (int) Cache::get('monitor:req_peak', 0),
+            'tempoMedio'  => $this->tempoMedio(),
+            'cacheHit'    => (int) round(Cache::get('monitor:cache_hit', 0)),
+        ];
     }
-
-    try {
-        $inicio = Carbon::parse($inicioStr);
-    } catch (\Throwable $e) {
-        // fallback — se algo falhar, usa agora
-        $inicio = now();
-        Cache::put('monitor:boot_at_str', $inicio->toIso8601String(), 86400);
-    }
-
-    $seg   = max(0, $inicio->diffInSeconds(now(), false) * -1);
-    $dias  = floor($seg / 86400);
-    $horas = floor(($seg % 86400) / 3600);
-    $min   = floor(($seg % 3600) / 60);
-
-    return [
-        'uptime'       => "{$dias}d {$horas}h {$min}m",
-        'uptimeDesde'  => $inicio->format('d/m H:i'),
-        'pedidosMin'   => (int) Cache::get('monitor:req_last_min', 0),
-        'picoPedidos'  => (int) Cache::get('monitor:req_peak', 0),
-        'tempoMedio'   => $this->tempoMedio(),
-        'cacheHit'     => (int) round(Cache::get('monitor:cache_hit', 0)),
-    ];
-}
 
     private function tempoMedio(): int
     {
@@ -421,7 +424,6 @@ class AdminMonitorizacaoController extends Controller
 
     private function mapearNivel(string $nivel): string
     {
-        // A BD pode ter 'critico' | 'atencao' | 'info'
         if (in_array($nivel, ['critico', 'atencao', 'info'])) return $nivel;
         if ($nivel === 'warning') return 'atencao';
         if ($nivel === 'error') return 'critico';
@@ -431,12 +433,12 @@ class AdminMonitorizacaoController extends Controller
     private function iconeAlerta(string $tipo): string
     {
         return match ($tipo) {
-            'hotlist'   => 'warning',
-            'clonagem'  => 'content_copy',
-            'sinistro'  => 'report_problem',
-            'multa'     => 'receipt_long',
-            'infracao'  => 'gavel',
-            default     => 'info',
+            'hotlist'  => 'warning',
+            'clonagem' => 'content_copy',
+            'sinistro' => 'report_problem',
+            'multa'    => 'receipt_long',
+            'infracao' => 'gavel',
+            default    => 'info',
         };
     }
 

@@ -88,7 +88,7 @@ class ChefeEscalaController extends Controller
 
         return response()->json([
             'id'     => (string) $e->id,
-            'escala' => $this->formatar($e->fresh('agente')),
+            'escala' => $this->formatar($e->load('agente')),
         ], 201);
     }
 
@@ -115,7 +115,7 @@ class ChefeEscalaController extends Controller
 
         return response()->json([
             'id'     => (string) $e->id,
-            'escala' => $this->formatar($e->fresh('agente')),
+            'escala' => $this->formatar($e->load('agente')),
         ]);
     }
 
@@ -140,7 +140,7 @@ class ChefeEscalaController extends Controller
 
         return response()->json([
             'id'     => (string) $e->id,
-            'escala' => $this->formatar($e->fresh('agente')),
+            'escala' => $this->formatar($e->load('agente')),
         ]);
     }
 
@@ -268,22 +268,36 @@ class ChefeEscalaController extends Controller
         ], self::DIAS_PADRAO);
     }
 
+    /**
+     * KPIs — 2 queries em vez de 4.
+     * (total + publicadas + rascunhos numa só, e cobertura noutra)
+     */
     private function kpis(): array
     {
-        $total      = Escala::count();
-        $publicadas = Escala::where('estado', 'Publicada')->count();
-        $rascunhos  = Escala::where('estado', 'Rascunho')->count();
+        // 1 query — total, publicadas, rascunhos
+        $row = Escala::selectRaw("
+            COUNT(*) as total,
+            SUM(CASE WHEN estado = 'Publicada' THEN 1 ELSE 0 END) as publicadas,
+            SUM(CASE WHEN estado = 'Rascunho'  THEN 1 ELSE 0 END) as rascunhos
+        ")->first();
 
-        $escalas = Escala::all();
+        $total      = (int) $row->total;
+        $publicadas = (int) $row->publicadas;
+        $rascunhos  = (int) $row->rascunhos;
+
+        // Cobertura — precisa de iterar as atribuições (JSON)
         $cobertura = 0;
-        if ($escalas->count() > 0) {
+        if ($total > 0) {
+            $atribuicoes = Escala::pluck('atribuicoes');
+
             $soma = 0;
-            foreach ($escalas as $e) {
-                $atr = $e->atribuicoes ?? [];
-                $ativos = collect($atr)->where('ativo', true)->count();
-                $soma += $ativos;
+            foreach ($atribuicoes as $atr) {
+                $lista = is_string($atr) ? json_decode($atr, true) : $atr;
+                if (!is_array($lista)) continue;
+                $soma += count(array_filter($lista, fn ($a) => !empty($a['ativo'])));
             }
-            $mediaPorEscala = $soma / $escalas->count();
+
+            $mediaPorEscala = $soma / $total;
             $cobertura = round(($mediaPorEscala / 7) * 100, 1);
         }
 

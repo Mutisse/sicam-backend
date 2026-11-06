@@ -4,183 +4,148 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\Abordagem;
-use App\Models\Hotlist;
 use App\Models\Posto;
 use App\Models\User;
 use App\Models\Veiculo;
-use App\Services\NotificacaoService;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Validation\Rule;
 
-class AbordagemController extends Controller
+class PrmAbordagemController extends Controller
 {
-    private const COORDS = [
-        'Posto Baixa'          => ['lat' => -25.9683, 'lng' => 32.5758],
-        'Posto KaMpfumo'       => ['lat' => -25.9722, 'lng' => 32.5733],
-        'Posto Matola'         => ['lat' => -25.9622, 'lng' => 32.4589],
-        'Posto Machava'        => ['lat' => -25.9218, 'lng' => 32.4812],
-        'Posto Namaacha (EN4)' => ['lat' => -26.0164, 'lng' => 32.0297],
-    ];
-
-    // ═══════════════════════════════════════════════════════════
-    // GET /api/abordagens
-    // ═══════════════════════════════════════════════════════════
+    /**
+     * GET /api/abordagens
+     * Devolve { items, kpis } — contrato esperado pelo abordagens.service.ts.
+     */
     public function index(Request $request)
     {
-        $abordagens = Abordagem::with([
-                'veiculo:id,matricula',
+        $query = Abordagem::with([
+                'veiculo:id,matricula,marca,modelo',
+                'posto:id,nome,latitude,longitude', // Traz as coordenadas reais do posto
                 'agente:id,name',
-                'posto:id,nome',
             ])
+            ->when($request->filled('q'), function ($q) use ($request) {
+                $termo = '%' . $request->q . '%';
+                $q->where(function ($sub) use ($termo) {
+                    $sub->where('codigo', 'like', $termo)
+                        ->orWhere('local', 'like', $termo)
+                        ->orWhereHas('veiculo', fn ($v) => $v->where('matricula', 'like', $termo));
+                });
+            })
+            ->when($request->filled('resultado'),   fn ($q) => $q->where('resultado', $request->resultado))
+            ->when($request->filled('data_inicio'), fn ($q) => $q->whereDate('data', '>=', $request->data_inicio))
+            ->when($request->filled('data_fim'),    fn ($q) => $q->whereDate('data', '<=', $request->data_fim))
             ->orderByDesc('data')
-            ->get();
+            ->orderByDesc('id');
 
-        $veiculosHotlist = Hotlist::where('estado', 'Activo')
-            ->pluck('veiculo_id')
-            ->flip()
-            ->toArray();
+        $items = $query->get()->map(function (Abordagem $a) {
+            $lat = null;
+            $lng = null;
 
-        $items = $abordagens->map(fn ($a) => $this->formatar($a, $veiculosHotlist));
+            // Se o Posto existir e tiver coordenadas válidas (diferentes de 0), usa-as
+            if ($a->posto && $a->posto->latitude && $a->posto->longitude) {
+                $lat = (float) $a->posto->latitude;
+                $lng = (float) $a->posto->longitude;
+            }
+
+            return [
+                'id'          => (string) $a->id,
+                'codigo'      => $a->codigo,
+                'dataHora'    => $a->data ? $a->data->format('d/m/Y') : '',
+                'matricula'   => $a->veiculo->matricula ?? '',
+                'agente'      => $a->agente->name ?? '',
+                'posto'       => $a->posto->nome ?? '',
+                'local'       => $a->local ?? '',
+                'resultado'   => $a->resultado,
+                'emHotlist'   => false, // Podes implementar lógica real aqui se quiseres
+                'observacoes' => $a->observacoes,
+                'diasAtras'   => $a->data ? (int) $a->data->diffInDays(now()) : 0,
+                'lat'         => $lat,
+                'lng'         => $lng,
+            ];
+        })->values();
 
         return response()->json([
             'items' => $items,
-            'kpis'  => $this->kpis($veiculosHotlist),
+            'kpis'  => [
+                'total'         => $items->count(),
+                'semIncidentes' => $items->where('resultado', 'Sem incidentes')->count(),
+                'comDetencao'   => $items->where('resultado', 'Com detenção')->count(),
+                'emCurso'       => $items->where('resultado', 'Em curso')->count(),
+                'hotlist'       => 0,
+            ],
         ]);
     }
 
-    // ═══════════════════════════════════════════════════════════
-    // POST /api/abordagens
-    // ═══════════════════════════════════════════════════════════
+    /**
+     * POST /api/abordagens
+     * Frontend envia: { matricula, agente, posto, local, resultado, observacoes }
+     */
     public function store(Request $request)
     {
         $dados = $request->validate([
-            'matricula'   => 'required|string|max:20',
-            'agente'      => 'required|string',
-            'posto'       => 'required|string',
-            'local'       => 'required|string',
-            'resultado'   => 'required|in:Sem incidentes,Com detenção,Em curso',
-            'observacoes' => 'nullable|string',
+            'matricula'   => ['required', 'string', 'max:20', 'exists:veiculos,matricula'],
+            'agente'      => ['nullable', 'string', 'max:255'],
+            'posto'       => ['nullable', 'string', 'max:255'],
+            'local'       => ['nullable', 'string', 'max:255'],
+            'resultado'   => ['required', Rule::in(['Sem incidentes', 'Com detenção', 'Em curso'])],
+            'observacoes' => ['nullable', 'string'],
         ]);
 
-        $veiculo = Veiculo::firstOrCreate(
-            ['matricula' => strtoupper($dados['matricula'])],
-            ['marca' => '—', 'modelo' => '—', 'score' => 0, 'estado' => 'sem-dados']
-        );
+        try {
+            $abordagem = DB::transaction(function () use ($dados) {
+                $veiculo = Veiculo::where('matricula', $dados['matricula'])->firstOrFail();
 
-        $agente = User::where('name', 'like', '%' . str_replace('Agente ', '', $dados['agente']) . '%')->first();
-        $posto  = Posto::where('nome', $dados['posto'])->first();
+                // Resolve agente por nome (se existir)
+                $agenteId = null;
+                if (!empty($dados['agente'])) {
+                    $agenteId = User::where('name', $dados['agente'])->value('id');
+                }
 
-        $maxId  = Abordagem::max('id') ?? 0;
-        $codigo = 'AB-' . str_pad($maxId + 1, 3, '0', STR_PAD_LEFT);
+                // Resolve posto por nome
+                $postoId = null;
+                if (!empty($dados['posto'])) {
+                    $postoId = Posto::where('nome', $dados['posto'])->value('id');
+                }
 
-        $abordagem = Abordagem::create([
-            'codigo'      => $codigo,
-            'veiculo_id'  => $veiculo->id,
-            'agente_id'   => $agente?->id,
-            'posto_id'    => $posto?->id,
-            'local'       => $dados['local'],
-            'resultado'   => $dados['resultado'],
-            'data'        => now(),
-            'observacoes' => $dados['observacoes'] ?? null,
-        ]);
+                $ultimo = Abordagem::lockForUpdate()->max('id') ?? 0;
+                $codigo = 'AB-' . str_pad($ultimo + 1, 3, '0', STR_PAD_LEFT);
 
-        // ═══════════════════════════════════════════════════════
-        // 🔔 GATILHO — via NotificacaoService (centralizado)
-        // ═══════════════════════════════════════════════════════
-        $this->dispararNotificacoes($abordagem, $veiculo, $posto, $dados);
+                return Abordagem::create([
+                    'codigo'      => $codigo,
+                    'veiculo_id'  => $veiculo->id,
+                    'agente_id'   => $agenteId,
+                    'posto_id'    => $postoId,
+                    'local'       => $dados['local']       ?? null,
+                    'data'        => now()->toDateString(),
+                    'resultado'   => $dados['resultado'],
+                    'observacoes' => $dados['observacoes'] ?? null,
+                ]);
+            });
 
-        return response()->json([
-            'id'   => (string) $abordagem->id,
-            'kpis' => $this->kpis([]),
-        ], 201);
+            return response()->json([
+                'id'   => (string) $abordagem->id,
+                'kpis' => [], // o store recarrega a lista a seguir
+            ], 201);
+        } catch (\Throwable $e) {
+            return response()->json([
+                'message' => 'Falha ao registar a abordagem.',
+                'error'   => $e->getMessage(),
+            ], 500);
+        }
     }
 
-    // ═══════════════════════════════════════════════════════════
-    // DELETE /api/abordagens/{id}
-    // ═══════════════════════════════════════════════════════════
-    public function destroy(int $id)
+    /**
+     * DELETE /api/abordagens/{id}
+     */
+    public function destroy($id)
     {
-        Abordagem::findOrFail($id)->delete();
-        return response()->noContent();
-    }
-
-    // ═══════════════════════════════════════════════════════════
-    // Helpers internos
-    // ═══════════════════════════════════════════════════════════
-    private function kpis(array $veiculosHotlist): array
-    {
-        $row = Abordagem::selectRaw("
-            COUNT(*) as total,
-            SUM(CASE WHEN resultado = 'Sem incidentes' THEN 1 ELSE 0 END) as sem_incidentes,
-            SUM(CASE WHEN resultado = 'Com detenção' THEN 1 ELSE 0 END) as com_detencao,
-            SUM(CASE WHEN resultado = 'Em curso' THEN 1 ELSE 0 END) as em_curso
-        ")->first();
-
-        $hotlist = 0;
-        if (!empty($veiculosHotlist)) {
-            $hotlist = Abordagem::whereIn('veiculo_id', array_keys($veiculosHotlist))->count();
+        $abordagem = Abordagem::find($id);
+        if (!$abordagem) {
+            return response()->json(['message' => 'Abordagem não encontrada.'], 404);
         }
 
-        return [
-            'total'         => (int) $row->total,
-            'semIncidentes' => (int) $row->sem_incidentes,
-            'comDetencao'   => (int) $row->com_detencao,
-            'emCurso'       => (int) $row->em_curso,
-            'hotlist'       => (int) $hotlist,
-        ];
-    }
-
-    private function formatar(Abordagem $a, array $veiculosHotlist): array
-    {
-        $veiculo = $a->veiculo;
-        $emHotlist = $veiculo ? isset($veiculosHotlist[$veiculo->id]) : false;
-
-        $postoNome = $a->posto?->nome ?? 'Posto Baixa';
-        $coord = self::COORDS[$postoNome] ?? ['lat' => -25.9653, 'lng' => 32.5892];
-
-        return [
-            'id'          => (string) $a->id,
-            'codigo'      => $a->codigo,
-            'dataHora'    => $a->data?->format('d/m H:i') ?? '—',
-            'matricula'   => $veiculo?->matricula ?? '—',
-            'agente'      => $a->agente?->name ?? '—',
-            'posto'       => $postoNome,
-            'local'       => $a->local ?? '—',
-            'resultado'   => $a->resultado,
-            'emHotlist'   => $emHotlist,
-            'observacoes' => $a->observacoes ?? null,
-            'diasAtras'   => $a->data ? now()->diffInDays($a->data) : 0,
-            'lat'         => $coord['lat'],
-            'lng'         => $coord['lng'],
-        ];
-    }
-
-    private function dispararNotificacoes(
-        Abordagem $abordagem,
-        Veiculo $veiculo,
-        ?Posto $posto,
-        array $dados
-    ): void {
-        // ═══ CASO 1 — Com detenção ═══
-        if ($dados['resultado'] === 'Com detenção') {
-            NotificacaoService::abordagemComDetencao(
-                $abordagem->codigo,
-                $veiculo->matricula,
-                $posto?->nome ?? 'posto',
-                $dados['local']
-            );
-        }
-
-        // ═══ CASO 2 — Veículo da hotlist ═══
-        $emHotlist = Hotlist::where('veiculo_id', $veiculo->id)
-            ->where('estado', 'Activo')
-            ->exists();
-
-        if ($emHotlist) {
-            NotificacaoService::veiculoHotlistAbordado(
-                $veiculo->matricula,
-                $dados['local'],
-                $dados['resultado']
-            );
-        }
+        $abordagem->delete();
+        return response()->json(['message' => 'Abordagem eliminada.']);
     }
 }

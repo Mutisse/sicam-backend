@@ -5,215 +5,211 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\Abordagem;
 use App\Models\Hotlist;
-use App\Models\Veiculo;
-use Carbon\Carbon;
+use App\Models\Posto;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 
-class RelatorioPrmController extends Controller
+class PrmRelatorioController extends Controller
 {
     /**
-     * GET /api/relatorios/prm?de=2026-09-01&ate=2026-09-30
+     * GET /api/relatorios/prm
+     * Produz exactamente o contrato RelatorioPrm do frontend.
      */
     public function prm(Request $request)
     {
-        $de  = $request->filled('de')  ? Carbon::parse($request->de)->startOfDay()  : null;
-        $ate = $request->filled('ate') ? Carbon::parse($request->ate)->endOfDay()    : null;
+        // Frontend envia ?de=YYYY-MM-DD&ate=YYYY-MM-DD
+        $inicio = $request->input('de',  now()->subDays(29)->toDateString());
+        $fim    = $request->input('ate', now()->toDateString());
 
-        // ============================================================
-        // KPIs base
-        // ============================================================
-        $qAbordagens = Abordagem::query();
-        if ($de)  $qAbordagens->where('data', '>=', $de);
-        if ($ate) $qAbordagens->where('data', '<=', $ate);
+        // ─────────────────────────────────────────────
+        // 1) KPIs agregados
+        // ─────────────────────────────────────────────
+        $hotlistQuery = Hotlist::query();
+        $abordQuery   = Abordagem::whereBetween('data', [$inicio, $fim]);
 
-        $totalAbordagens = (clone $qAbordagens)->count();
-        $totalVeiculos   = Veiculo::count();
-        $totalHotlist    = Hotlist::count();
+        $hotlistActiva = (clone $hotlistQuery)->where('estado', 'ativo')->count();
+        $resolvidos    = (clone $hotlistQuery)->where('estado', 'resolvido')->count();
+        $emAberto      = (clone $hotlistQuery)->where('estado', 'ativo')->count();
+        $totalHotlist  = (clone $hotlistQuery)->count();
 
-        $hotlistActiva  = Hotlist::where('estado', 'activa')->count();
-        $hotlistResolv  = Hotlist::where('estado', 'resolvida')->count();
-
-        // Abordagens nos últimos 30 dias
-        $abordagens30d = Abordagem::where('data', '>=', now()->subDays(30))->count();
-
-        // Detenções = abordagens com resultado "detido" (ou similar)
-        $detencoes = (clone $qAbordagens)
-            ->where('resultado', 'like', '%deti%')
-            ->count();
-
-        // Resolvidos / em aberto (na hotlist)
-        $resolvidos = $hotlistResolv;
-        $emAberto   = $hotlistActiva;
+        $abordagens30d = (clone $abordQuery)->count();
+        $detencoes     = (clone $abordQuery)->where('resultado', 'Com detenção')->count();
 
         $taxaResolucao = $totalHotlist > 0
             ? round(($resolvidos / $totalHotlist) * 100, 1)
             : 0;
 
-        // ============================================================
-        // Série por mês (últimos 6 meses) — abordagens
-        // ============================================================
-        $inicio = now()->subMonths(5)->startOfMonth();
-        $fim    = now()->endOfMonth();
+        // Tempo médio (dias) entre detecção e resolução
+        $tempoMedio = (clone $hotlistQuery)
+            ->whereNotNull('resolvido_em')
+            ->whereNotNull('detectado_em')
+            ->selectRaw('AVG(DATEDIFF(resolvido_em, detectado_em)) as media')
+            ->value('media');
+        $tempoMedio = $tempoMedio ? round((float) $tempoMedio, 1) : 0;
 
-        $registos = Abordagem::query()
-            ->whereBetween('data', [$inicio, $fim])
-            ->selectRaw("DATE_FORMAT(data, '%Y-%m') as ym, COUNT(*) as total")
-            ->groupBy('ym')
-            ->pluck('total', 'ym');
+        $kpis = [
+            'hotlistActiva'  => $hotlistActiva,
+            'abordagens30d'  => $abordagens30d,
+            'detencoes'      => $detencoes,
+            'resolvidos'     => $resolvidos,
+            'emAberto'       => $emAberto,
+            'taxaResolucao'  => $taxaResolucao,
+            'tempoMedio'     => $tempoMedio,
+        ];
 
-        $linhaValores = [];
-        $linhaLabels  = [];
-        $cursor = $inicio->copy();
-        while ($cursor->lte($fim)) {
-            $ym = $cursor->format('Y-m');
-            $linhaValores[] = (int) ($registos[$ym] ?? 0);
-            $linhaLabels[]  = $cursor->translatedFormat('M');
-            $cursor->addMonth();
-        }
-
-        // ============================================================
-        // Hotlist por motivo (coluna real = motivo)
-        // ============================================================
-        $coresMotivos = ['#dc2626', '#f59e0b', '#10b981', '#3b82f6', '#8b5cf6', '#ec4899'];
-
-        $hotlistPorMotivo = Hotlist::query()
-            ->select('motivo')
-            ->selectRaw('COUNT(*) as total')
-            ->groupBy('motivo')
-            ->orderByDesc('total')
-            ->limit(6)
-            ->get()
-            ->values()
-            ->map(function ($r, $i) use ($totalHotlist, $coresMotivos) {
-                return [
-                    'nome'        => $r->motivo ?? 'Outro',
-                    'valor'       => (int) $r->total,
-                    'cor'         => $coresMotivos[$i % count($coresMotivos)],
-                    'percentagem' => $totalHotlist > 0
-                        ? round(($r->total / $totalHotlist) * 100, 1)
-                        : 0,
-                ];
-            })
-            ->toArray();
-
-        // ============================================================
-        // Desempenho por posto (abordagens)
-        // ============================================================
-        $desempenhoPorPosto = (clone $qAbordagens)
-            ->select('posto_id')
-            ->selectRaw('COUNT(*) as total')
-            ->selectRaw("SUM(CASE WHEN resultado LIKE '%deti%' THEN 1 ELSE 0 END) as detencoes")
-            ->selectRaw("SUM(CASE WHEN resultado LIKE '%auto%' OR resultado LIKE '%multa%' THEN 1 ELSE 0 END) as autos")
-            ->groupBy('posto_id')
-            ->with('posto:id,nome,provincia')
-            ->orderByDesc('total')
-            ->limit(10)
-            ->get()
-            ->map(function ($r) {
-                $taxa = $r->total > 0 ? round(($r->detencoes / $r->total) * 100, 1) : 0;
-
-                return [
-                    'posto'      => $r->posto?->nome ?? '—',
-                    'provincia'  => $r->posto?->provincia ?? '—',
-                    'abordagens' => (int) $r->total,
-                    'detencoes'  => (int) $r->detencoes,
-                    'autos'      => (int) $r->autos,
-                    'taxa'       => $taxa,
-                ];
-            })
-            ->toArray();
-
-        // ============================================================
-        // Top matrículas abordadas
-        // ============================================================
-        $topMatriculas = Abordagem::query()
-            ->when($de, fn ($q) => $q->where('data', '>=', $de))
-            ->when($ate, fn ($q) => $q->where('data', '<=', $ate))
-            ->select('veiculo_id')
-            ->selectRaw('COUNT(*) as total')
-            ->selectRaw('MAX(resultado) as ultimo_resultado')
-            ->groupBy('veiculo_id')
-            ->with('veiculo:id,matricula')
-            ->orderByDesc('total')
-            ->limit(5)
-            ->get()
-            ->map(function ($r) {
-                $ab = (int) $r->total;
-                $nivel = $ab >= 4 ? 'alto' : ($ab >= 2 ? 'medio' : 'baixo');
-
-                return [
-                    'matricula'  => $r->veiculo?->matricula ?? '—',
-                    'motivo'     => $r->ultimo_resultado ?? 'Abordagem',
-                    'abordagens' => $ab,
-                    'nivel'      => $nivel,
-                ];
-            })
-            ->toArray();
-
-        // ============================================================
-        // KPIs visíveis (com formato para cartões)
-        // ============================================================
+        // ─────────────────────────────────────────────
+        // 2) Cards visíveis (kpisVisiveis)
+        // ─────────────────────────────────────────────
         $kpisVisiveis = [
             [
-                'variant' => 'critico',
-                'icon'    => 'local_police',
-                'valor'   => $hotlistActiva,
-                'label'   => 'Hotlist activa',
-                'sub'     => 'veículos procurados',
+                'variant'  => 'critico',
+                'icon'     => 'local_police',
+                'valor'    => $hotlistActiva,
+                'label'    => 'Hotlist activa',
+                'sub'      => 'veículos sinalizados',
             ],
             [
-                'variant' => 'info',
-                'icon'    => 'fact_check',
-                'valor'   => $abordagens30d,
-                'label'   => 'Abordagens (30d)',
-                'sub'     => 'últimos 30 dias',
+                'variant'  => 'info',
+                'icon'     => 'fact_check',
+                'valor'    => $abordagens30d,
+                'label'    => 'Abordagens (30d)',
+                'sub'      => 'no período selecionado',
             ],
             [
-                'variant' => 'atencao',
-                'icon'    => 'gavel',
-                'valor'   => $detencoes,
-                'label'   => 'Detenções',
-                'sub'     => 'no período',
+                'variant'  => 'atencao',
+                'icon'     => 'gavel',
+                'valor'    => $detencoes,
+                'label'    => 'Detenções',
+                'sub'      => 'com detenção registada',
             ],
             [
-                'variant' => 'regular',
-                'icon'    => 'check_circle',
-                'valor'   => $resolvidos,
-                'label'   => 'Resolvidos',
-                'sub'     => 'hotlist fechada',
-            ],
-            [
-                'variant' => 'neutral',
-                'icon'    => 'hourglass_empty',
-                'valor'   => $emAberto,
-                'label'   => 'Em aberto',
-                'sub'     => 'a acompanhar',
+                'variant'      => 'regular',
+                'icon'         => 'check_circle',
+                'valor'        => $taxaResolucao,
+                'unidade'      => '%',
+                'label'        => 'Taxa de resolução',
+                'percentagem'  => $taxaResolucao,
             ],
         ];
 
+        // ─────────────────────────────────────────────
+        // 3) Linha (últimos 30 dias)
+        // ─────────────────────────────────────────────
+        $porDia = (clone $abordQuery)
+            ->select(DB::raw('DATE(data) as dia'), DB::raw('COUNT(*) as total'))
+            ->groupBy('dia')
+            ->pluck('total', 'dia');
+
+        $valores = [];
+        $labels  = [];
+        $diasSemana = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
+
+        for ($i = 29; $i >= 0; $i--) {
+            $dia = now()->subDays($i);
+            $valores[] = (int) ($porDia[$dia->toDateString()] ?? 0);
+            $labels[]  = $diasSemana[$dia->dayOfWeek];
+        }
+
+        $linha = ['valores' => $valores, 'labels' => $labels];
+
+        // ─────────────────────────────────────────────
+        // 4) Anel
+        // ─────────────────────────────────────────────
+        $anel = [
+            'taxa'      => $taxaResolucao,
+            'resolvidos' => $resolvidos,
+            'emAberto'   => $emAberto,
+        ];
+
+        // ─────────────────────────────────────────────
+        // 5) Hotlist por motivo
+        // ─────────────────────────────────────────────
+        $motivosRaw = (clone $hotlistQuery)
+            ->select('motivo', DB::raw('COUNT(*) as total'))
+            ->groupBy('motivo')
+            ->orderByDesc('total')
+            ->get();
+
+        $totalMotivos = $motivosRaw->sum('total') ?: 1;
+        $coresMotivo  = ['#dc2626', '#d97706', '#2563eb', '#64748b', '#16a34a'];
+
+        $hotlistPorMotivo = $motivosRaw->values()->map(function ($m, $i) use ($totalMotivos, $coresMotivo) {
+            return [
+                'nome'         => $m->motivo,
+                'valor'        => (int) $m->total,
+                'cor'          => $coresMotivo[$i % count($coresMotivo)],
+                'percentagem'  => round(($m->total / $totalMotivos) * 100, 1),
+            ];
+        })->toArray();
+
+        // ─────────────────────────────────────────────
+        // 6) Desempenho por posto
+        // ─────────────────────────────────────────────
+        $porPosto = DB::table('abordagens as a')
+            ->leftJoin('postos as p', 'p.id', '=', 'a.posto_id')
+            ->whereBetween('a.data', [$inicio, $fim])
+            ->select(
+                'p.nome as posto',
+                'p.provincia',
+                DB::raw('COUNT(a.id) as abordagens'),
+                DB::raw("SUM(CASE WHEN a.resultado = 'Com detenção' THEN 1 ELSE 0 END) as detencoes"),
+            )
+            ->groupBy('p.id', 'p.nome', 'p.provincia')
+            ->orderByDesc('abordagens')
+            ->limit(10)
+            ->get();
+
+        $desempenhoPorPosto = $porPosto->map(function ($p) {
+            $autos = 0; // se tiveres tabela de autos, ajusta aqui
+            $total = (int) $p->abordagens;
+            $det   = (int) $p->detencoes;
+            return [
+                'posto'      => $p->posto ?? '—',
+                'provincia'  => $p->provincia ?? '—',
+                'abordagens' => $total,
+                'detencoes'  => $det,
+                'autos'      => $autos,
+                'taxa'       => $total > 0 ? round((($total - $det) / $total) * 100, 1) : 0,
+            ];
+        })->toArray();
+
+        // ─────────────────────────────────────────────
+        // 7) Top matrículas abordadas
+        // ─────────────────────────────────────────────
+        $topRaw = DB::table('abordagens as a')
+            ->join('veiculos as v', 'v.id', '=', 'a.veiculo_id')
+            ->whereBetween('a.data', [$inicio, $fim])
+            ->select(
+                'v.matricula',
+                DB::raw('COUNT(a.id) as total'),
+                DB::raw("MAX(a.resultado) as ultimo_resultado")
+            )
+            ->groupBy('v.id', 'v.matricula')
+            ->orderByDesc('total')
+            ->limit(10)
+            ->get();
+
+        $topMatriculas = $topRaw->map(function ($t) {
+            $nivel = $t->total >= 5 ? 'alto' : ($t->total >= 3 ? 'medio' : 'baixo');
+            return [
+                'matricula'  => $t->matricula,
+                'motivo'     => $t->ultimo_resultado ?? 'Abordagem múltipla',
+                'abordagens' => (int) $t->total,
+                'nivel'      => $nivel,
+            ];
+        })->toArray();
+
+        // ─────────────────────────────────────────────
+        // Resposta final — contrato RelatorioPrm
+        // ─────────────────────────────────────────────
         return response()->json([
-            'kpis' => [
-                'hotlistActiva' => $hotlistActiva,
-                'abordagens30d' => $abordagens30d,
-                'detencoes'     => $detencoes,
-                'resolvidos'    => $resolvidos,
-                'emAberto'      => $emAberto,
-                'taxaResolucao' => $taxaResolucao,
-                'tempoMedio'    => 0,
-            ],
-            'kpisVisiveis' => $kpisVisiveis,
-            'linha' => [
-                'valores' => $linhaValores,
-                'labels'  => $linhaLabels,
-            ],
-            'anel' => [
-                'taxa'       => $taxaResolucao,
-                'resolvidos' => $resolvidos,
-                'emAberto'   => $emAberto,
-            ],
-            'hotlistPorMotivo'   => $hotlistPorMotivo,
+            'kpis'              => $kpis,
+            'kpisVisiveis'      => $kpisVisiveis,
+            'linha'             => $linha,
+            'anel'              => $anel,
+            'hotlistPorMotivo'  => $hotlistPorMotivo,
             'desempenhoPorPosto' => $desempenhoPorPosto,
-            'topMatriculas'      => $topMatriculas,
+            'topMatriculas'     => $topMatriculas,
         ]);
     }
 }

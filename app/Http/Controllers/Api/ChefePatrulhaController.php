@@ -8,6 +8,7 @@ use App\Models\Patrulha;
 use Barryvdh\DomPDF\Facade\Pdf;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Maatwebsite\Excel\Facades\Excel;
 
 class ChefePatrulhaController extends Controller
@@ -63,18 +64,18 @@ class ChefePatrulhaController extends Controller
     public function store(Request $request)
     {
         $dados = $request->validate([
-            'nome'              => 'required|string|max:120',
-            'data'              => 'required|string',
-            'horaInicio'        => 'required|string',
-            'horaFim'           => 'nullable|string',
-            'turno'             => 'required|string|in:Manhã,Tarde,Noite',
-            'agente_id'         => 'required|integer|exists:users,id',
-            'viatura'           => 'nullable|string|max:30',
-            'local'             => 'required|string|max:120',
-            'prioridade'        => 'required|string|in:Baixa,Média,Alta',
-            'pontos_previstos'  => 'required|integer|min:1|max:100',
-            'estado'            => 'nullable|string|in:Planeada,Em curso,Concluída,Cancelada',
-            'notas'             => 'nullable|string',
+            'nome'             => 'required|string|max:120',
+            'data'             => 'required|string',
+            'horaInicio'       => 'required|string',
+            'horaFim'          => 'nullable|string',
+            'turno'            => 'required|string|in:Manhã,Tarde,Noite',
+            'agente_id'        => 'required|integer|exists:users,id',
+            'viatura'          => 'nullable|string|max:30',
+            'local'            => 'required|string|max:120',
+            'prioridade'       => 'required|string|in:Baixa,Média,Alta',
+            'pontos_previstos' => 'required|integer|min:1|max:100',
+            'estado'           => 'nullable|string|in:Planeada,Em curso,Concluída,Cancelada',
+            'notas'            => 'nullable|string',
         ]);
 
         $inicio = $this->parseDataHora($dados['data'], $dados['horaInicio']);
@@ -102,7 +103,7 @@ class ChefePatrulhaController extends Controller
 
         return response()->json([
             'id'       => (string) $p->id,
-            'patrulha' => $this->formatar($p->fresh('agente')),
+            'patrulha' => $this->formatar($p->load('agente')),
         ], 201);
     }
 
@@ -144,7 +145,7 @@ class ChefePatrulhaController extends Controller
 
         return response()->json([
             'id'       => (string) $p->id,
-            'patrulha' => $this->formatar($p->fresh('agente')),
+            'patrulha' => $this->formatar($p->load('agente')),
         ]);
     }
 
@@ -167,7 +168,7 @@ class ChefePatrulhaController extends Controller
         $p->update(['estado' => 'Em curso']);
         return response()->json([
             'id'       => (string) $p->id,
-            'patrulha' => $this->formatar($p->fresh('agente')),
+            'patrulha' => $this->formatar($p->load('agente')),
         ]);
     }
 
@@ -184,7 +185,7 @@ class ChefePatrulhaController extends Controller
         ]);
         return response()->json([
             'id'       => (string) $p->id,
-            'patrulha' => $this->formatar($p->fresh('agente')),
+            'patrulha' => $this->formatar($p->load('agente')),
         ]);
     }
 
@@ -197,7 +198,7 @@ class ChefePatrulhaController extends Controller
         $p->update(['estado' => 'Cancelada']);
         return response()->json([
             'id'       => (string) $p->id,
-            'patrulha' => $this->formatar($p->fresh('agente')),
+            'patrulha' => $this->formatar($p->load('agente')),
         ]);
     }
 
@@ -291,35 +292,46 @@ class ChefePatrulhaController extends Controller
     private function formatar(Patrulha $p): array
     {
         return [
-            'id'                => (string) $p->id,
-            'codigo'            => $p->codigo ?? '—',
-            'nome'              => $p->nome ?? '—',
-            'data'              => $p->inicio?->format('d/m/Y') ?? '—',
-            'horaInicio'        => $p->inicio?->format('H:i') ?? '—',
-            'horaFim'           => $p->fim?->format('H:i') ?? '—',
-            'turno'             => $p->turno ?? '—',
-            'agente'            => $p->agente?->name ?? '—',
-            'agenteId'          => (string) ($p->agente_id ?? ''),
-            'viatura'           => $p->viatura ?? '—',
-            'zona'              => $p->local ?? '—',
-            'pontosPrevistos'   => (int) $p->pontos_previstos,
-            'pontosConcluidos'  => (int) $p->pontos_concluidos,
-            'prioridade'        => $p->prioridade ?? 'Média',
-            'estado'            => $p->estado ?? 'Planeada',
-            'paragens'          => $p->paragens ?? [],
-            'notas'             => $p->notas,
-            'criadoEm'          => $p->created_at?->format('d/m/Y H:i') ?? '—',
+            'id'               => (string) $p->id,
+            'codigo'           => $p->codigo ?? '—',
+            'nome'             => $p->nome ?? '—',
+            'data'             => $p->inicio?->format('d/m/Y') ?? '—',
+            'horaInicio'       => $p->inicio?->format('H:i') ?? '—',
+            'horaFim'          => $p->fim?->format('H:i') ?? '—',
+            'turno'            => $p->turno ?? '—',
+            'agente'           => $p->agente?->name ?? '—',
+            'agenteId'         => (string) ($p->agente_id ?? ''),
+            'viatura'          => $p->viatura ?? '—',
+            'zona'             => $p->local ?? '—',
+            'pontosPrevistos'  => (int) $p->pontos_previstos,
+            'pontosConcluidos' => (int) $p->pontos_concluidos,
+            'prioridade'       => $p->prioridade ?? 'Média',
+            'estado'           => $p->estado ?? 'Planeada',
+            'paragens'         => $p->paragens ?? [],
+            'notas'            => $p->notas,
+            'criadoEm'         => $p->created_at?->format('d/m/Y H:i') ?? '—',
         ];
     }
 
+    /**
+     * KPIs — 1 query com SUM(CASE).
+     */
     private function kpis(): array
     {
+        $row = Patrulha::selectRaw("
+            COUNT(*) as total,
+            SUM(CASE WHEN estado = 'Planeada'  THEN 1 ELSE 0 END) as planeadas,
+            SUM(CASE WHEN estado = 'Em curso'  THEN 1 ELSE 0 END) as em_curso,
+            SUM(CASE WHEN estado = 'Concluída' THEN 1 ELSE 0 END) as concluidas,
+            SUM(CASE WHEN estado = 'Cancelada' THEN 1 ELSE 0 END) as canceladas
+        ")->first();
+
         return [
-            'total'      => Patrulha::count(),
-            'planeadas'  => Patrulha::where('estado', 'Planeada')->count(),
-            'emCurso'    => Patrulha::where('estado', 'Em curso')->count(),
-            'concluidas' => Patrulha::where('estado', 'Concluída')->count(),
-            'canceladas' => Patrulha::where('estado', 'Cancelada')->count(),
+            'total'      => (int) $row->total,
+            'planeadas'  => (int) $row->planeadas,
+            'emCurso'    => (int) $row->em_curso,
+            'concluidas' => (int) $row->concluidas,
+            'canceladas' => (int) $row->canceladas,
         ];
     }
 

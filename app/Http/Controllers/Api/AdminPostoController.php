@@ -55,20 +55,7 @@ class AdminPostoController extends Controller
             ->limit(500)
             ->get()
             ->map(function ($p) use ($agentesPorPosto, $criticosPorPosto) {
-                return [
-                    'id'         => (string) $p->id,
-                    'codigo'     => $p->codigo,
-                    'nome'       => $p->nome,
-                    'provincia'  => $p->provincia,
-                    'distrito'   => $p->distrito,
-                    'agentes'    => (int) ($agentesPorPosto[$p->nome] ?? 0),
-                    'criticos'   => (int) ($criticosPorPosto[$p->id] ?? 0),
-                    'cor'        => $p->cor ?? '#2563eb',
-                    'endereco'   => $p->endereco,
-                    'telefone'   => $p->telefone,
-                    'notas'      => $p->notas,
-                    'estado'     => $p->estado ?? 'Ativo',
-                ];
+                return $this->formatar($p, $agentesPorPosto, $criticosPorPosto);
             });
 
         return response()->json([
@@ -84,26 +71,26 @@ class AdminPostoController extends Controller
     {
         $p = Posto::findOrFail($id);
 
-        $agentes = DB::table('users')->where('posto', $p->nome)->count();
-        $criticos = 0;
+        $agentesPorPosto = DB::table('users')
+            ->select('posto', DB::raw('COUNT(*) as total'))
+            ->whereNotNull('posto')
+            ->groupBy('posto')
+            ->pluck('total', 'posto')
+            ->toArray();
+
+        $criticosPorPosto = [];
         if (DB::getSchemaBuilder()->hasColumn('veiculos', 'posto_id')) {
-            $criticos = DB::table('veiculos')->where('posto_id', $p->id)->count();
+            $criticosPorPosto = DB::table('veiculos')
+                ->select('posto_id', DB::raw('COUNT(*) as total'))
+                ->whereNotNull('posto_id')
+                ->groupBy('posto_id')
+                ->pluck('total', 'posto_id')
+                ->toArray();
         }
 
-        return response()->json([
-            'id'        => (string) $p->id,
-            'codigo'    => $p->codigo,
-            'nome'      => $p->nome,
-            'provincia' => $p->provincia,
-            'distrito'  => $p->distrito,
-            'agentes'   => $agentes,
-            'criticos'  => $criticos,
-            'cor'       => $p->cor ?? '#2563eb',
-            'endereco'  => $p->endereco,
-            'telefone'  => $p->telefone,
-            'notas'     => $p->notas,
-            'estado'    => $p->estado ?? 'Ativo',
-        ]);
+        return response()->json(
+            $this->formatar($p, $agentesPorPosto, $criticosPorPosto),
+        );
     }
 
     /**
@@ -133,9 +120,10 @@ class AdminPostoController extends Controller
             'estado'    => 'Ativo',
         ]);
 
+        // ⭐ Formata directo — sem chamar o show() (evita 2 queries extra)
         return response()->json([
             'id'    => (string) $p->id,
-            'posto' => $this->show((int) $p->id)->getData(true),
+            'posto' => $this->formatar($p, [], []),
         ], 201);
     }
 
@@ -167,9 +155,27 @@ class AdminPostoController extends Controller
 
         $p->update($update);
 
+        // Contagens necessárias para a resposta
+        $agentesPorPosto = DB::table('users')
+            ->select('posto', DB::raw('COUNT(*) as total'))
+            ->whereNotNull('posto')
+            ->groupBy('posto')
+            ->pluck('total', 'posto')
+            ->toArray();
+
+        $criticosPorPosto = [];
+        if (DB::getSchemaBuilder()->hasColumn('veiculos', 'posto_id')) {
+            $criticosPorPosto = DB::table('veiculos')
+                ->select('posto_id', DB::raw('COUNT(*) as total'))
+                ->whereNotNull('posto_id')
+                ->groupBy('posto_id')
+                ->pluck('total', 'posto_id')
+                ->toArray();
+        }
+
         return response()->json([
             'id'    => (string) $p->id,
-            'posto' => $this->show((int) $p->id)->getData(true),
+            'posto' => $this->formatar($p, $agentesPorPosto, $criticosPorPosto),
         ]);
     }
 
@@ -226,13 +232,42 @@ class AdminPostoController extends Controller
     // Helpers
     // ============================================================
 
-    private function kpis(array $agentesPorPosto, array $criticosPorPosto): array
+    /**
+     * Formata um posto para a resposta JSON.
+     */
+    private function formatar(Posto $p, array $agentesPorPosto, array $criticosPorPosto): array
     {
         return [
-            'total'      => Posto::count(),
+            'id'        => (string) $p->id,
+            'codigo'    => $p->codigo,
+            'nome'      => $p->nome,
+            'provincia' => $p->provincia,
+            'distrito'  => $p->distrito,
+            'agentes'   => (int) ($agentesPorPosto[$p->nome] ?? 0),
+            'criticos'  => (int) ($criticosPorPosto[$p->id] ?? 0),
+            'cor'       => $p->cor ?? '#2563eb',
+            'endereco'  => $p->endereco,
+            'telefone'  => $p->telefone,
+            'notas'     => $p->notas,
+            'estado'    => $p->estado ?? 'Ativo',
+        ];
+    }
+
+    /**
+     * KPIs com 2 queries (em vez de 4).
+     */
+    private function kpis(array $agentesPorPosto, array $criticosPorPosto): array
+    {
+        $row = Posto::selectRaw("
+            COUNT(*) as total,
+            COUNT(DISTINCT provincia) as provincias
+        ")->first();
+
+        return [
+            'total'      => (int) $row->total,
             'agentes'    => array_sum($agentesPorPosto),
             'criticos'   => array_sum($criticosPorPosto),
-            'provincias' => Posto::distinct('provincia')->count('provincia'),
+            'provincias' => (int) $row->provincias,
         ];
     }
 }

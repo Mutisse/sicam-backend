@@ -81,10 +81,17 @@ class ChefeController extends Controller
         }
 
         // ═══════════════════════════════════════════════════════
-        // 4) AGENTES — 1 query só (barras + cards)
+        // 4) AGENTES — 1 query (total + online)
         // ═══════════════════════════════════════════════════════
-        $totalAgentes  = User::where('perfil_id', 8)->count();
-        $agentesOnline = User::where('perfil_id', 8)->where('estado', 'Ativo')->count();
+        $ag = User::where('perfil_id', 8)
+            ->selectRaw("
+                COUNT(*) as total,
+                SUM(CASE WHEN estado = 'Ativo' THEN 1 ELSE 0 END) as online
+            ")
+            ->first();
+
+        $totalAgentes  = (int) $ag->total;
+        $agentesOnline = (int) $ag->online;
 
         // ═══════════════════════════════════════════════════════
         // 5) BARRAS (top 5 agentes) — 1 query com JOIN

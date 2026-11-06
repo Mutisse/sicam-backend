@@ -30,8 +30,8 @@ class GestmulMultaController extends Controller
             });
         }
 
-        if ($request->filled('estado'))    $query->where('estado', $request->estado);
-        if ($request->filled('infracao'))  $query->where('infracao', $request->infracao);
+        if ($request->filled('estado'))   $query->where('estado', $request->estado);
+        if ($request->filled('infracao')) $query->where('infracao', $request->infracao);
         if ($request->filled('agente')) {
             $query->whereHas('agente', fn ($a) => $a->where('name', $request->agente));
         }
@@ -84,7 +84,7 @@ class GestmulMultaController extends Controller
 
         return response()->json([
             'id'    => (string) $m->id,
-            'multa' => $this->formatar($m->fresh()->load(['veiculo', 'agente', 'posto'])),
+            'multa' => $this->formatar($m->load(['veiculo', 'agente', 'posto'])),
             'kpis'  => $this->kpis(),
         ]);
     }
@@ -113,7 +113,7 @@ class GestmulMultaController extends Controller
 
         return response()->json([
             'id'    => (string) $m->id,
-            'multa' => $this->formatar($m->fresh()->load(['veiculo', 'agente', 'posto'])),
+            'multa' => $this->formatar($m->load(['veiculo', 'agente', 'posto'])),
             'kpis'  => $this->kpis(),
         ]);
     }
@@ -128,14 +128,13 @@ class GestmulMultaController extends Controller
 
         return response()->json([
             'id'    => (string) $m->id,
-            'multa' => $this->formatar($m->fresh()->load(['veiculo', 'agente', 'posto'])),
+            'multa' => $this->formatar($m->load(['veiculo', 'agente', 'posto'])),
             'kpis'  => $this->kpis(),
         ]);
     }
 
     /**
      * POST /api/gestmul/multas/{id}/pagar
-     * Body: { metodo, pagador, referencia? }
      */
     public function pagar(Request $request, int $id)
     {
@@ -167,8 +166,8 @@ class GestmulMultaController extends Controller
         ]);
 
         return response()->json([
-            'multa'  => $this->formatar($m->fresh()->load(['veiculo', 'agente', 'posto'])),
-            'recibo' => $this->formatarRecibo($recibo, $m->fresh()),
+            'multa'  => $this->formatar($m->load(['veiculo', 'agente', 'posto'])),
+            'recibo' => $this->formatarRecibo($recibo, $m),
             'kpis'   => $this->kpis(),
         ]);
     }
@@ -274,17 +273,31 @@ class GestmulMultaController extends Controller
         ];
     }
 
+    /**
+     * KPIs — 1 query com SUM(CASE) em vez de 8.
+     */
     private function kpis(): array
     {
+        $row = Multa::selectRaw("
+            COUNT(*) as total,
+            SUM(CASE WHEN estado = 'Paga'       THEN 1 ELSE 0 END) as pagas,
+            SUM(CASE WHEN estado = 'Pendente'   THEN 1 ELSE 0 END) as pendentes,
+            SUM(CASE WHEN estado = 'Contestada' THEN 1 ELSE 0 END) as contestadas,
+            SUM(CASE WHEN estado = 'Anulada'    THEN 1 ELSE 0 END) as anuladas,
+            SUM(valor) as valor_total,
+            SUM(CASE WHEN estado = 'Paga'     THEN valor ELSE 0 END) as valor_pago,
+            SUM(CASE WHEN estado = 'Pendente' THEN valor ELSE 0 END) as valor_pendente
+        ")->first();
+
         return [
-            'total'          => Multa::count(),
-            'pagas'          => Multa::where('estado', 'Paga')->count(),
-            'pendentes'      => Multa::where('estado', 'Pendente')->count(),
-            'contestadas'    => Multa::where('estado', 'Contestada')->count(),
-            'anuladas'       => Multa::where('estado', 'Anulada')->count(),
-            'valorTotal'     => (float) Multa::sum('valor'),
-            'valorPago'      => (float) Multa::where('estado', 'Paga')->sum('valor'),
-            'valorPendente'  => (float) Multa::where('estado', 'Pendente')->sum('valor'),
+            'total'         => (int) $row->total,
+            'pagas'         => (int) $row->pagas,
+            'pendentes'     => (int) $row->pendentes,
+            'contestadas'   => (int) $row->contestadas,
+            'anuladas'      => (int) $row->anuladas,
+            'valorTotal'    => (float) $row->valor_total,
+            'valorPago'     => (float) $row->valor_pago,
+            'valorPendente' => (float) $row->valor_pendente,
         ];
     }
 
@@ -292,8 +305,8 @@ class GestmulMultaController extends Controller
     {
         $query = Multa::with(['veiculo', 'agente', 'posto']);
 
-        if ($request->filled('estado'))    $query->where('estado', $request->estado);
-        if ($request->filled('infracao'))  $query->where('infracao', $request->infracao);
+        if ($request->filled('estado'))   $query->where('estado', $request->estado);
+        if ($request->filled('infracao')) $query->where('infracao', $request->infracao);
 
         return $query->orderByDesc('data')->limit(1000)->get();
     }

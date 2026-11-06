@@ -50,7 +50,7 @@ class GestmulPagamentoController extends Controller
             'kpis'   => $this->kpis(),
             'opcoes' => [
                 'metodo' => Recibo::select('metodo')->distinct()->pluck('metodo'),
-                'estado' => ['Confirmado', 'Pendente', 'Anulado'],
+                'estado' => Recibo::select('estado')->distinct()->pluck('estado'),
             ],
         ]);
     }
@@ -80,10 +80,11 @@ class GestmulPagamentoController extends Controller
         ]);
 
         $r->update($dados);
+        $r->load(['multa.veiculo', 'multa.agente', 'multa.posto']);
 
         return response()->json([
             'id'       => (string) $r->id,
-            'pagamento'=> $this->formatar($r->fresh()->load(['multa.veiculo', 'multa.agente', 'multa.posto'])),
+            'pagamento'=> $this->formatar($r),
             'kpis'     => $this->kpis(),
         ]);
     }
@@ -109,10 +110,11 @@ class GestmulPagamentoController extends Controller
     {
         $r = Recibo::findOrFail($id);
         $r->update(['estado' => 'Confirmado']);
+        $r->load(['multa.veiculo', 'multa.agente', 'multa.posto']);
 
         return response()->json([
             'id'       => (string) $r->id,
-            'pagamento'=> $this->formatar($r->fresh()->load(['multa.veiculo', 'multa.agente', 'multa.posto'])),
+            'pagamento'=> $this->formatar($r),
             'kpis'     => $this->kpis(),
         ]);
     }
@@ -124,10 +126,11 @@ class GestmulPagamentoController extends Controller
     {
         $r = Recibo::findOrFail($id);
         $r->update(['estado' => 'Anulado']);
+        $r->load(['multa.veiculo', 'multa.agente', 'multa.posto']);
 
         return response()->json([
             'id'       => (string) $r->id,
-            'pagamento'=> $this->formatar($r->fresh()->load(['multa.veiculo', 'multa.agente', 'multa.posto'])),
+            'pagamento'=> $this->formatar($r),
             'kpis'     => $this->kpis(),
         ]);
     }
@@ -152,32 +155,39 @@ class GestmulPagamentoController extends Controller
             return response()->json(['message' => 'Multa não encontrada.'], 422);
         }
 
-        // Gera número do recibo
-        $numero = $this->gerarNumeroRecibo();
+        $estado = $dados['estado'] ?? 'Confirmado';
 
-        $r = Recibo::create([
-            'numero'      => $numero,
-            'multa_id'    => $multa->id,
-            'metodo'      => $dados['metodo'],
-            'pagador'     => $dados['pagador'],
-            'referencia'  => $dados['referencia'] ?? null,
-            'valor'       => $multa->valor,
-            'estado'      => $dados['estado'] ?? 'Confirmado',
-            'observacoes' => $dados['observacoes'] ?? null,
-            'criado_por'  => $request->user()?->id,
-        ]);
+        // Transacção + lock para evitar race condition no número do recibo
+        $r = DB::transaction(function () use ($dados, $multa, $request, $estado) {
+            $numero = $this->gerarNumeroRecibo();
 
-        // Marca multa como paga (se o recibo é Confirmado)
-        if (($dados['estado'] ?? 'Confirmado') === 'Confirmado') {
-            $multa->update([
-                'estado'         => 'Paga',
-                'data_pagamento' => now()->toDateString(),
+            $recibo = Recibo::create([
+                'numero'      => $numero,
+                'multa_id'    => $multa->id,
+                'metodo'      => $dados['metodo'],
+                'pagador'     => $dados['pagador'],
+                'referencia'  => $dados['referencia'] ?? null,
+                'valor'       => $multa->valor,
+                'estado'      => $estado,
+                'observacoes' => $dados['observacoes'] ?? null,
+                'criado_por'  => $request->user()?->id,
             ]);
-        }
+
+            if ($estado === 'Confirmado') {
+                $multa->update([
+                    'estado'         => 'Paga',
+                    'data_pagamento' => now()->toDateString(),
+                ]);
+            }
+
+            return $recibo;
+        });
+
+        $r->load(['multa.veiculo', 'multa.agente', 'multa.posto']);
 
         return response()->json([
             'id'       => (string) $r->id,
-            'pagamento'=> $this->formatar($r->fresh()->load(['multa.veiculo', 'multa.agente', 'multa.posto'])),
+            'pagamento'=> $this->formatar($r),
             'kpis'     => $this->kpis(),
         ], 201);
     }
@@ -292,26 +302,32 @@ class GestmulPagamentoController extends Controller
         ];
     }
 
+    /**
+     * KPIs — 1 query com SUM(CASE WHEN)
+     */
     private function kpis(): array
     {
-        $confirmados = Recibo::where('estado', 'Confirmado')->get();
-        $pendentes   = Recibo::where('estado', 'Pendente')->get();
-        $anulados    = Recibo::where('estado', 'Anulado')->get();
-        $total       = Recibo::count();
+        $row = Recibo::selectRaw("
+            COUNT(*) as total,
+            SUM(CASE WHEN estado = 'Confirmado' THEN 1 ELSE 0 END) as confirmados,
+            SUM(CASE WHEN estado = 'Pendente'   THEN 1 ELSE 0 END) as pendentes,
+            SUM(CASE WHEN estado = 'Anulado'    THEN 1 ELSE 0 END) as anulados,
+            SUM(CASE WHEN estado = 'Confirmado' THEN valor ELSE 0 END) as valor_confirmado,
+            SUM(CASE WHEN estado = 'Pendente'   THEN valor ELSE 0 END) as valor_pendente,
+            SUM(valor) as valor_total
+        ")->first();
 
-        $valorConfirmado = (float) $confirmados->sum('valor');
-        $valorPendente   = (float) $pendentes->sum('valor');
-        $valorTotal      = (float) Recibo::sum('valor');
+        $total = (int) $row->total;
 
         return [
-            'total'          => $total,
-            'confirmados'    => $confirmados->count(),
-            'pendentes'      => $pendentes->count(),
-            'anulados'       => $anulados->count(),
-            'valorConfirmado'=> $valorConfirmado,
-            'valorPendente'  => $valorPendente,
-            'valorTotal'     => $valorTotal,
-            'ticketMedio'    => $total > 0 ? round($valorTotal / $total) : 0,
+            'total'           => $total,
+            'confirmados'     => (int) $row->confirmados,
+            'pendentes'       => (int) $row->pendentes,
+            'anulados'        => (int) $row->anulados,
+            'valorConfirmado' => (float) $row->valor_confirmado,
+            'valorPendente'   => (float) $row->valor_pendente,
+            'valorTotal'      => (float) $row->valor_total,
+            'ticketMedio'     => $total > 0 ? round($row->valor_total / $total) : 0,
         ];
     }
 
@@ -325,10 +341,17 @@ class GestmulPagamentoController extends Controller
         return $query->orderByDesc('created_at')->limit(1000)->get();
     }
 
+    /**
+     * Gera número de recibo com lock (chamado dentro de transacção).
+     */
     private function gerarNumeroRecibo(): string
     {
         $ano = now()->year;
-        $ultimo = Recibo::whereYear('created_at', $ano)->orderByDesc('id')->first();
+
+        $ultimo = Recibo::whereYear('created_at', $ano)
+            ->lockForUpdate()
+            ->orderByDesc('id')
+            ->first();
 
         $seq = 1;
         if ($ultimo && preg_match('/(\d{6})$/', $ultimo->numero, $m)) {

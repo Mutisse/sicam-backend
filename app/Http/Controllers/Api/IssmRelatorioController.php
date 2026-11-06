@@ -9,7 +9,6 @@ use Barryvdh\DomPDF\Facade\Pdf;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
-use Illuminate\Support\Facades\Schema;
 use Maatwebsite\Excel\Facades\Excel;
 
 class IssmRelatorioController extends Controller
@@ -32,11 +31,11 @@ class IssmRelatorioController extends Controller
                 'de'  => $de->format('Y-m-d'),
                 'ate' => $ate->format('Y-m-d'),
             ],
-            'kpis'                   => $this->kpis($de, $ate),
-            'apolicesPorMes'         => $this->apolicesPorMes(),
-            'apolicesPorSeguradora'  => $this->apolicesPorSeguradora(),
-            'desempenhoPorSeguradora'=> $this->desempenhoPorSeguradora($de, $ate),
-            'topTipos'               => $this->topTipos(),
+            'kpis'                    => $this->kpis(),
+            'apolicesPorMes'          => $this->apolicesPorMes(),
+            'apolicesPorSeguradora'   => $this->apolicesPorSeguradora($de, $ate),
+            'desempenhoPorSeguradora' => $this->desempenhoPorSeguradora($de, $ate),
+            'topTipos'                => $this->topTipos($de, $ate),
         ]);
     }
 
@@ -105,40 +104,37 @@ class IssmRelatorioController extends Controller
     // Helpers
     // ============================================================
 
-    private function kpis(Carbon $de, Carbon $ate): array
+    /**
+     * KPIs — 3 queries (agregado de apólices + sinistros + veículos).
+     */
+    private function kpis(): array
     {
-        $hoje = Carbon::today();
+        $hoje   = Carbon::today();
+        $fim30d = $hoje->copy()->addDays(30);
 
-        // Apólices com validade futura
-        $apolicesActivas = Apolice::query()
-            ->where('validade', '>=', $hoje)
+        // ── 1 query — agregado de apólices ──
+        $a = Apolice::selectRaw("
+            SUM(CASE WHEN validade >= ? THEN 1 ELSE 0 END) as activas,
+            SUM(CASE WHEN validade BETWEEN ? AND ? THEN 1 ELSE 0 END) as a_expirar,
+            AVG(premio) as premio_medio
+        ", [$hoje, $hoje, $fim30d])->first();
+
+        $apolicesActivas = (int) $a->activas;
+        $aExpirar        = (int) $a->a_expirar;
+        $premioMedio     = (int) round($a->premio_medio ?? 0);
+
+        // ── 1 query — sinistros em aberto ──
+        $sinistrosAbertos = DB::table('sinistros')
+            ->whereNotIn('estado', ['Resolvido', 'Fechado', 'Pago', 'Arquivado'])
             ->count();
 
-        // Sinistros em aberto
-        $sinistrosAbertos = Schema::hasTable('sinistros')
-            ? DB::table('sinistros')
-                ->whereNotIn('estado', ['Resolvido', 'Fechado', 'Pago', 'Arquivado'])
-                ->count()
-            : 0;
-
-        // A expirar nos próximos 30 dias
-        $aExpirar = Apolice::query()
-            ->whereBetween('validade', [$hoje, $hoje->copy()->addDays(30)])
-            ->count();
-
-        // Taxa de cobertura (apólices activas / total de veículos)
-        $totalVeiculos = Schema::hasTable('veiculos')
-            ? DB::table('veiculos')->count()
-            : 0;
+        // ── 1 query — total de veículos ──
+        $totalVeiculos = DB::table('veiculos')->count();
 
         $taxaCobertura = $totalVeiculos > 0
             ? round(($apolicesActivas / $totalVeiculos) * 100, 1)
             : 0;
 
-        // Prémio médio (coluna correta: premio)
-        $premioMedio = (int) round(Apolice::avg('premio') ?? 0);
-
-        // Taxa de sinistralidade
         $taxaSinistralidade = $apolicesActivas > 0
             ? round(($sinistrosAbertos / $apolicesActivas) * 100, 1)
             : 0;
@@ -153,30 +149,41 @@ class IssmRelatorioController extends Controller
         ];
     }
 
+    /**
+     * Apólices por mês — 1 query GROUP BY mês.
+     */
     private function apolicesPorMes(): array
     {
+        $inicio = Carbon::today()->subMonths(5)->startOfMonth();
+        $fim    = Carbon::today()->endOfMonth();
+
+        $porMes = Apolice::query()
+            ->whereBetween('created_at', [$inicio, $fim])
+            ->selectRaw("DATE_FORMAT(created_at, '%Y-%m') as ym, COUNT(*) as total")
+            ->groupBy('ym')
+            ->pluck('total', 'ym');
+
         $meses = [];
-        for ($i = 5; $i >= 0; $i--) {
-            $data = Carbon::today()->subMonths($i);
-            $ini  = $data->copy()->startOfMonth();
-            $fim  = $data->copy()->endOfMonth();
-
-            $count = Apolice::query()
-                ->whereBetween('created_at', [$ini, $fim])
-                ->count();
-
+        $cursor = $inicio->copy();
+        while ($cursor->lte($fim)) {
+            $ym = $cursor->format('Y-m');
             $meses[] = [
-                'mes'      => mb_strtoupper($data->locale('pt')->isoFormat('MMM')),
-                'apolices' => $count,
+                'mes'      => mb_strtoupper($cursor->locale('pt')->isoFormat('MMM')),
+                'apolices' => (int) ($porMes[$ym] ?? 0),
             ];
+            $cursor->addMonth();
         }
         return $meses;
     }
 
-    private function apolicesPorSeguradora(): array
+    /**
+     * Apólices por seguradora — 1 query, percentagem relativa ao total.
+     */
+    private function apolicesPorSeguradora(Carbon $de, Carbon $ate): array
     {
         $dados = Apolice::query()
             ->select('seguradora', DB::raw('COUNT(*) as total'))
+            ->whereBetween('created_at', [$de, $ate])
             ->groupBy('seguradora')
             ->orderByDesc('total')
             ->limit(8)
@@ -184,17 +191,21 @@ class IssmRelatorioController extends Controller
 
         if ($dados->isEmpty()) return [];
 
-        $max = $dados->max('total') ?: 1;
+        $soma = $dados->sum('total') ?: 1;
 
         return $dados->map(fn ($d) => [
             'nome'        => $d->seguradora,
             'valor'       => (int) $d->total,
-            'percentagem' => round(($d->total / $max) * 100, 1),
+            'percentagem' => round(($d->total / $soma) * 100, 1),
         ])->toArray();
     }
 
+    /**
+     * Desempenho por seguradora — 2 queries fixas (apólices + sinistros agregados).
+     */
     private function desempenhoPorSeguradora(Carbon $de, Carbon $ate): array
     {
+        // ── 1 query — apólices por seguradora no período ──
         $seguradoras = Apolice::query()
             ->select(
                 'seguradora',
@@ -207,13 +218,21 @@ class IssmRelatorioController extends Controller
             ->limit(10)
             ->get();
 
-        return $seguradoras->map(function ($s) {
-            $sinistros = Schema::hasTable('sinistros')
-                ? DB::table('sinistros')
-                    ->where('seguradora', $s->seguradora)
-                    ->whereNotIn('estado', ['Resolvido', 'Fechado', 'Pago', 'Arquivado'])
-                    ->count()
-                : 0;
+        if ($seguradoras->isEmpty()) return [];
+
+        // ── 1 query — sinistros por seguradora no período ──
+        $nomes = $seguradoras->pluck('seguradora')->all();
+
+        $sinistrosPorSeg = DB::table('sinistros')
+            ->select('seguradora', DB::raw('COUNT(*) as total'))
+            ->whereIn('seguradora', $nomes)
+            ->whereNotIn('estado', ['Resolvido', 'Fechado', 'Pago', 'Arquivado'])
+            ->whereBetween('created_at', [$de, $ate])
+            ->groupBy('seguradora')
+            ->pluck('total', 'seguradora');
+
+        return $seguradoras->map(function ($s) use ($sinistrosPorSeg) {
+            $sinistros = (int) ($sinistrosPorSeg[$s->seguradora] ?? 0);
 
             $taxa = $s->apolices > 0
                 ? round(($sinistros / $s->apolices) * 100, 1)
@@ -236,11 +255,15 @@ class IssmRelatorioController extends Controller
         })->toArray();
     }
 
-    private function topTipos(): array
+    /**
+     * Top tipos de apólice — 1 query, percentagem relativa ao total.
+     */
+    private function topTipos(Carbon $de, Carbon $ate): array
     {
         $tipos = Apolice::query()
             ->select('tipo', DB::raw('COUNT(*) as total'))
             ->whereNotNull('tipo')
+            ->whereBetween('created_at', [$de, $ate])
             ->groupBy('tipo')
             ->orderByDesc('total')
             ->limit(5)
