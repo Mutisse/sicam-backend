@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Exports\DadosExport;
 use App\Http\Controllers\Controller;
+use App\Models\Hotlist;
 use App\Models\Multa;
 use App\Models\Recibo;
 use Barryvdh\DomPDF\Facade\Pdf;
@@ -137,7 +138,6 @@ class GestmulPagamentoController extends Controller
 
     /**
      * POST /api/gestmul/pagamentos
-     * (registo manual a partir de uma multa existente)
      */
     public function store(Request $request)
     {
@@ -157,7 +157,6 @@ class GestmulPagamentoController extends Controller
 
         $estado = $dados['estado'] ?? 'Confirmado';
 
-        // Transacção + lock para evitar race condition no número do recibo
         $r = DB::transaction(function () use ($dados, $multa, $request, $estado) {
             $numero = $this->gerarNumeroRecibo();
 
@@ -178,6 +177,9 @@ class GestmulPagamentoController extends Controller
                     'estado'         => 'Paga',
                     'data_pagamento' => now()->toDateString(),
                 ]);
+
+                // LÓGICA DE NEGÓCIO: Verifica se deve sair da Hotlist
+                $this->avaliarHotlistPorMultas($multa->veiculo_id);
             }
 
             return $recibo;
@@ -239,6 +241,40 @@ class GestmulPagamentoController extends Controller
     // ============================================================
     // Helpers
     // ============================================================
+
+    private function avaliarHotlistPorMultas(int $veiculoId): void
+    {
+        $pendentes = Multa::where('veiculo_id', $veiculoId)->where('estado', 'Pendente');
+        $totalPendentes = $pendentes->count();
+        $valorPendente = $pendentes->sum('valor');
+
+        $hotlistAtiva = Hotlist::where('veiculo_id', $veiculoId)->where('estado', 'ativo')->first();
+
+        if ($totalPendentes >= 3) {
+            if ($hotlistAtiva) {
+                $hotlistAtiva->update([
+                    'multas_pendentes' => $totalPendentes,
+                    'valor_multas'     => $valorPendente,
+                ]);
+            } else {
+                Hotlist::create([
+                    'veiculo_id'       => $veiculoId,
+                    'motivo'           => 'Multas em atraso',
+                    'perigo'           => 'medio',
+                    'prioridade'       => 'media',
+                    'multas_pendentes' => $totalPendentes,
+                    'valor_multas'     => $valorPendente,
+                    'estado'           => 'ativo',
+                    'descricao'        => 'Inserido automaticamente por excesso de multas pendentes.',
+                    'detectado_em'     => now(),
+                ]);
+            }
+        } else {
+            if ($hotlistAtiva && $hotlistAtiva->motivo === 'Multas em atraso') {
+                $hotlistAtiva->update(['estado' => 'resolvido', 'resolvido_em' => now()]);
+            }
+        }
+    }
 
     private function formatar(Recibo $r): array
     {
@@ -302,9 +338,6 @@ class GestmulPagamentoController extends Controller
         ];
     }
 
-    /**
-     * KPIs — 1 query com SUM(CASE WHEN)
-     */
     private function kpis(): array
     {
         $row = Recibo::selectRaw("
@@ -341,9 +374,6 @@ class GestmulPagamentoController extends Controller
         return $query->orderByDesc('created_at')->limit(1000)->get();
     }
 
-    /**
-     * Gera número de recibo com lock (chamado dentro de transacção).
-     */
     private function gerarNumeroRecibo(): string
     {
         $ano = now()->year;

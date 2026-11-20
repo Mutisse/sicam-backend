@@ -4,8 +4,8 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\Aprovacao;
+use App\Services\SicamIAService;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\DB;
 
 class ChefeAprovacaoController extends Controller
 {
@@ -39,6 +39,40 @@ class ChefeAprovacaoController extends Controller
             'items' => $items,
             'kpis'  => $this->kpis(),
         ]);
+    }
+
+    /**
+     * GET /api/chefe/aprovacoes/resumo-ia
+     */
+    public function resumoIA(Request $request, SicamIAService $ia)
+    {
+        $aprovacoes = Aprovacao::where('estado', 'pendente')->orderByDesc('created_at')->get();
+
+        if ($aprovacoes->isEmpty()) {
+            return response()->json([
+                'resumo' => "Bom trabalho! Não há nenhuma aprovação pendente de momento. Todas as operações estão em dia. Pode focar-se no patrulhamento das zonas críticas.",
+            ]);
+        }
+
+        $dadosAprovacoes = $aprovacoes->map(function ($a) {
+            return [
+                'codigo'        => $a->codigo ?? '—',
+                'tipo'          => $a->tipo ?? '—',
+                'titulo'        => $a->titulo ?? '—',
+                'matricula'     => $a->matricula ?? '—',
+                'agente'        => $a->agente ?? '—',
+                'prioridade'    => $a->prioridade ?? 'Média',
+                'detalhes'      => $a->detalhes ?? [],
+                'criado_em'     => $a->created_at?->format('d/m/Y H:i') ?? '—',
+            ];
+        })->toArray();
+
+        $resposta = $ia->analisarAprovacoes([
+            'total_pendentes' => $aprovacoes->count(),
+            'aprovacoes'      => $dadosAprovacoes,
+        ]);
+
+        return response()->json($resposta);
     }
 
     /**
@@ -121,9 +155,6 @@ class ChefeAprovacaoController extends Controller
         ];
     }
 
-    /**
-     * KPIs — 1 query com SUM(CASE).
-     */
     private function kpis(): array
     {
         $hoje = now()->startOfDay();
@@ -138,7 +169,7 @@ class ChefeAprovacaoController extends Controller
             'pendentes'      => (int) $row->pendentes,
             'aprovadosHoje'  => (int) $row->aprovados_hoje,
             'rejeitadosHoje' => (int) $row->rejeitados_hoje,
-            'tempoMedio'     => 12, // stub — não há dados reais de tempo
+            'tempoMedio'     => 12,
         ];
     }
 }

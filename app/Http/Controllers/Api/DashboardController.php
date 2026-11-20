@@ -9,6 +9,8 @@ use App\Models\Veiculo;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Schema;
+use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Log;
 
 class DashboardController extends Controller
 {
@@ -52,24 +54,21 @@ class DashboardController extends Controller
                 : "COUNT(*) as total, 0 as ativas"
             )->first();
 
-            // 3. Agentes (Verifica se a coluna 'estado' ou 'activo' existe em users)
+            // 3. Agentes
             $agentesQuery = User::query();
             if ($provincia && $provincia !== 'Todas') {
-                // Nota: Se users não tiver posto_id, isto vai falhar. Verifica o Model User.
                 $agentesQuery->whereHas('posto', fn($q) => $q->where('provincia', $provincia));
             }
             
             $hasEstadoUser = Schema::hasColumn('users', 'estado');
             $hasActivoUser = Schema::hasColumn('users', 'activo');
 
-            $agentesQuerySelect = "COUNT(*) as total, 0 as ativos"; // fallback
-
             if ($hasEstadoUser) {
                 $agentesQuerySelect = "COUNT(*) as total, SUM(CASE WHEN estado = 'Ativo' THEN 1 ELSE 0 END) as ativos";
             } elseif ($hasActivoUser) {
                 $agentesQuerySelect = "COUNT(*) as total, SUM(CASE WHEN activo = 1 THEN 1 ELSE 0 END) as ativos";
             } else {
-                $agentesQuerySelect = "COUNT(*) as total, COUNT(*) as ativos"; // assume todos ativos se não houver coluna
+                $agentesQuerySelect = "COUNT(*) as total, COUNT(*) as ativos";
             }
 
             $agentesStats = (clone $agentesQuery)->selectRaw($agentesQuerySelect)->first();
@@ -91,11 +90,65 @@ class DashboardController extends Controller
     public function catalogos()
     {
         return Cache::remember('dashboard_catalogos', now()->addHour(), function () {
-            // Usa pluck('nome') para devolver apenas as strings
             return [
                 'provincias' => \App\Models\Provincia::orderBy('nome')->pluck('nome')->toArray(),
                 'postos'     => \App\Models\Posto::orderBy('nome')->pluck('nome')->toArray(),
             ];
         });
+    }
+
+    // ────────────────────────────────────────────────────────
+    // GET /api/dashboard/chefe/resumo-ia
+    // ────────────────────────────────────────────────────────
+    public function resumoIAChefe(Request $request)
+    {
+        $user = $request->user();
+        if (!$user) {
+            return response()->json(['resumo' => 'Não autenticado.'], 401);
+        }
+
+        // 1. Recolhe os dados reais para a IA
+        $veiculos = Veiculo::count();
+        
+        // Considera crítico se score < 30 (ajusta conforme a tua regra de negócio)
+        $criticos = Veiculo::where('score', '<', 30)->count(); 
+        
+        $patrulhasAtivas = Patrulha::where('estado', 'Em curso')->count();
+        $agentesAtivos = User::where('estado', 'Ativo')->count();
+        
+        // Tenta buscar abordagens dos últimos 7 dias (com tratamento de erro se a tabela não existir)
+        $abordagens = 0;
+        try {
+            $abordagens = \DB::table('abordagens')
+                ->where('created_at', '>=', now()->subDays(7))
+                ->count();
+        } catch (\Throwable $e) {
+            Log::warning('[SICAM-IA] Tabela abordagens não encontrada.');
+        }
+
+        // 2. Envia para o Python (Gemini)
+        try {
+            $url = env('SICAM_IA_URL', 'http://127.0.0.1:8001') . '/api/resumo-chefe';
+
+            $response = Http::timeout(30)->post($url, [
+                'payload' => [
+                    'posto'            => $user->posto ?? 'Posto',
+                    'veiculos'         => $veiculos,
+                    'criticos'         => $criticos,
+                    'patrulhas_ativas' => $patrulhasAtivas,
+                    'agentes_ativos'   => $agentesAtivos,
+                    'abordagens'       => $abordagens,
+                ],
+            ]);
+
+            if ($response->successful()) {
+                return response()->json($response->json());
+            }
+
+            return response()->json(['resumo' => 'A IA não conseguiu gerar o resumo operacional.']);
+        } catch (\Throwable $e) {
+            Log::error('[SICAM-IA] Erro ao gerar resumo do chefe', ['erro' => $e->getMessage()]);
+            return response()->json(['resumo' => 'Erro de comunicação com o servidor de IA.']);
+        }
     }
 }

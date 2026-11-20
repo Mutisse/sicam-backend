@@ -5,17 +5,16 @@ namespace App\Http\Controllers\Api;
 use App\Exports\DadosExport;
 use App\Http\Controllers\Controller;
 use App\Models\Apolice;
+use App\Models\Hotlist;
 use App\Models\Veiculo;
 use Barryvdh\DomPDF\Facade\Pdf;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 use Maatwebsite\Excel\Facades\Excel;
 
 class IssmApoliceController extends Controller
 {
-    /**
-     * GET /api/issm/apolices
-     */
     public function index(Request $request)
     {
         $query = Apolice::query()->with('veiculo:id,matricula,marca,modelo,ano,cor');
@@ -46,18 +45,12 @@ class IssmApoliceController extends Controller
         ]);
     }
 
-    /**
-     * GET /api/issm/apolices/{id}
-     */
     public function show(int $id)
     {
         $a = Apolice::with('veiculo:id,matricula,marca,modelo,ano,cor')->findOrFail($id);
         return response()->json($this->formatar($a));
     }
 
-    /**
-     * POST /api/issm/apolices
-     */
     public function store(Request $request)
     {
         $dados = $request->validate([
@@ -76,12 +69,9 @@ class IssmApoliceController extends Controller
             'observacoes' => 'nullable|string',
         ]);
 
-        // Veículo TEM de existir — não criamos veículos incompletos.
         $veiculo = Veiculo::where('matricula', strtoupper($dados['matricula']))->first();
         if (!$veiculo) {
-            return response()->json([
-                'message' => 'Veículo não registado. Registe o veículo antes de criar a apólice.',
-            ], 422);
+            return response()->json(['message' => 'Veículo não registado.'], 422);
         }
 
         $inicio = $this->parseData($dados['inicio']);
@@ -92,21 +82,28 @@ class IssmApoliceController extends Controller
 
         $estado = $this->calcularEstado($inicio, $fim, $dados['estado'] ?? null);
 
-        $a = Apolice::create([
-            'numero'      => $dados['numero'],
-            'veiculo_id'  => $veiculo->id,
-            'segurado'    => $dados['segurado'],
-            'nif'         => $dados['nif'],
-            'telefone'    => $dados['telefone'] ?? null,
-            'email'       => $dados['email'] ?? null,
-            'seguradora'  => $dados['seguradora'],
-            'tipo'        => $dados['tipo'],
-            'inicio'      => $inicio,
-            'validade'    => $fim,
-            'premio'      => $dados['premio'],
-            'estado'      => $estado,
-            'observacoes' => $dados['observacoes'] ?? null,
-        ]);
+        $a = DB::transaction(function () use ($dados, $veiculo, $inicio, $fim, $estado) {
+            $nova = Apolice::create([
+                'numero'      => $dados['numero'],
+                'veiculo_id'  => $veiculo->id,
+                'segurado'    => $dados['segurado'],
+                'nif'         => $dados['nif'],
+                'telefone'    => $dados['telefone'] ?? null,
+                'email'       => $dados['email'] ?? null,
+                'seguradora'  => $dados['seguradora'],
+                'tipo'        => $dados['tipo'],
+                'inicio'      => $inicio,
+                'validade'    => $fim,
+                'premio'      => $dados['premio'],
+                'estado'      => $estado,
+                'observacoes' => $dados['observacoes'] ?? null,
+            ]);
+
+            // ⭐ LÓGICA DE NEGÓCIO: Atualiza Hotlist conforme o estado da apólice
+            $this->sincronizarHotlist($veiculo, $estado, $fim);
+
+            return $nova;
+        });
 
         return response()->json([
             'id'      => (string) $a->id,
@@ -114,9 +111,6 @@ class IssmApoliceController extends Controller
         ], 201);
     }
 
-    /**
-     * PUT /api/issm/apolices/{id}
-     */
     public function update(Request $request, int $id)
     {
         $a = Apolice::findOrFail($id);
@@ -139,9 +133,7 @@ class IssmApoliceController extends Controller
         if (isset($dados['matricula'])) {
             $veiculo = Veiculo::where('matricula', strtoupper($dados['matricula']))->first();
             if (!$veiculo) {
-                return response()->json([
-                    'message' => 'Veículo não registado. Registe o veículo antes de associar a apólice.',
-                ], 422);
+                return response()->json(['message' => 'Veículo não registado.'], 422);
             }
             $dados['veiculo_id'] = $veiculo->id;
             unset($dados['matricula']);
@@ -149,39 +141,38 @@ class IssmApoliceController extends Controller
 
         if (isset($dados['inicio'])) {
             $inicio = $this->parseData($dados['inicio']);
-            if (!$inicio) {
-                return response()->json(['message' => 'Data de início inválida.'], 422);
-            }
+            if (!$inicio) return response()->json(['message' => 'Data inválida.'], 422);
             $dados['inicio'] = $inicio;
         }
         if (isset($dados['fim'])) {
             $fim = $this->parseData($dados['fim']);
-            if (!$fim) {
-                return response()->json(['message' => 'Data de fim inválida.'], 422);
-            }
+            if (!$fim) return response()->json(['message' => 'Data inválida.'], 422);
             $dados['validade'] = $fim;
             unset($dados['fim']);
         }
 
-        // Recalcular estado se as datas mudaram (excepto se 'Anulada' explícita)
         if (isset($dados['inicio']) || isset($dados['validade'])) {
             $inicioFinal = $dados['inicio']  ?? $a->inicio;
             $fimFinal    = $dados['validade'] ?? $a->validade;
 
             if ($fimFinal->lt($inicioFinal)) {
-                return response()->json(['message' => 'Data de fim anterior à de início.'], 422);
+                return response()->json(['message' => 'Data fim < início.'], 422);
             }
 
             if (($dados['estado'] ?? $a->estado) !== 'Anulada') {
-                $dados['estado'] = $this->calcularEstado(
-                    $inicioFinal,
-                    $fimFinal,
-                    $dados['estado'] ?? null
-                );
+                $dados['estado'] = $this->calcularEstado($inicioFinal, $fimFinal, $dados['estado'] ?? null);
             }
         }
 
-        $a->update($dados);
+        DB::transaction(function () use ($a, $dados) {
+            $a->update($dados);
+            
+            // ⭐ Atualiza Hotlist se o estado da apólice mudou
+            $veiculo = $a->veiculo;
+            if ($veiculo) {
+                $this->sincronizarHotlist($veiculo, $a->estado, $a->validade);
+            }
+        });
 
         return response()->json([
             'id'      => (string) $a->id,
@@ -189,9 +180,6 @@ class IssmApoliceController extends Controller
         ]);
     }
 
-    /**
-     * DELETE /api/issm/apolices/{id}
-     */
     public function destroy(int $id)
     {
         $a = Apolice::findOrFail($id);
@@ -199,31 +187,18 @@ class IssmApoliceController extends Controller
         return response()->json(['ok' => true]);
     }
 
-    /**
-     * GET /api/issm/apolices/xlsx
-     */
     public function xlsx(Request $request)
     {
         $items = $this->listarParaExport($request);
 
-        $cabecalhos = [
-            'Nº Apólice', 'Matrícula', 'Segurado', 'NIF', 'Seguradora',
-            'Tipo', 'Início', 'Fim', 'Prémio (MT)', 'Estado',
-        ];
-
+        $cabecalhos = ['Nº Apólice', 'Matrícula', 'Segurado', 'NIF', 'Seguradora', 'Tipo', 'Início', 'Fim', 'Prémio (MT)', 'Estado'];
         $linhas = $items->map(function ($a) {
             $v = $a->veiculo;
             return [
-                $a->numero,
-                $v?->matricula ?? '—',
-                $a->segurado ?? '—',
-                $a->nif ?? '—',
-                $a->seguradora,
-                $a->tipo,
-                $a->inicio?->format('d/m/Y') ?? '—',
-                $a->validade?->format('d/m/Y') ?? '—',
-                (string) $a->premio,
-                $a->estado,
+                $a->numero, $v?->matricula ?? '—', $a->segurado ?? '—',
+                $a->nif ?? '—', $a->seguradora, $a->tipo,
+                $a->inicio?->format('d/m/Y') ?? '—', $a->validade?->format('d/m/Y') ?? '—',
+                (string) $a->premio, $a->estado,
             ];
         })->toArray();
 
@@ -233,28 +208,17 @@ class IssmApoliceController extends Controller
         );
     }
 
-    /**
-     * GET /api/issm/apolices/pdf
-     */
     public function pdf(Request $request)
     {
         $items = $this->listarParaExport($request);
 
-        $cabecalhos = [
-            'Nº Apólice', 'Matrícula', 'Segurado', 'Seguradora',
-            'Tipo', 'Início', 'Fim', 'Estado',
-        ];
-
+        $cabecalhos = ['Nº Apólice', 'Matrícula', 'Segurado', 'Seguradora', 'Tipo', 'Início', 'Fim', 'Estado'];
         $linhas = $items->map(function ($a) {
             $v = $a->veiculo;
             return [
-                $a->numero,
-                $v?->matricula ?? '—',
-                $a->segurado ?? '—',
-                $a->seguradora,
-                $a->tipo,
-                $a->inicio?->format('d/m/Y') ?? '—',
-                $a->validade?->format('d/m/Y') ?? '—',
+                $a->numero, $v?->matricula ?? '—', $a->segurado ?? '—',
+                $a->seguradora, $a->tipo,
+                $a->inicio?->format('d/m/Y') ?? '—', $a->validade?->format('d/m/Y') ?? '—',
                 $a->estado,
             ];
         })->toArray();
@@ -283,10 +247,50 @@ class IssmApoliceController extends Controller
     // Helpers
     // ============================================================
 
+    /**
+     * ⭐ Lógica de negócio: Coloca / Retira o veículo da Hotlist conforme o seguro.
+     */
+    private function sincronizarHotlist(Veiculo $veiculo, string $estado, ?Carbon $validade): void
+    {
+        $hotlistAtiva = Hotlist::where('veiculo_id', $veiculo->id)
+            ->where('estado', 'ativo')
+            ->where('motivo', 'Seguro expirado')
+            ->first();
+
+        if (in_array($estado, ['Expirada', 'Anulada'])) {
+            if (!$hotlistAtiva) {
+                Hotlist::create([
+                    'veiculo_id'       => $veiculo->id,
+                    'motivo'           => 'Seguro expirado',
+                    'perigo'           => 'alto',
+                    'prioridade'       => 'critica',
+                    'multas_pendentes' => 0,
+                    'valor_multas'     => 0,
+                    'estado'           => 'ativo',
+                    'descricao'        => "Apólice {$estado} — veículo sem seguro válido.",
+                    'detectado_em'     => now(),
+                ]);
+
+                // Notifica o Chefe do Posto e o INATRO
+                $chefes = \App\Models\User::whereHas('perfil', fn($q) => $q->where('key', 'chefe'))->get();
+                foreach ($chefes as $chefe) {
+                    $chefe->notificar(
+                        'Veículo sem seguro na Hotlist',
+                        "O veículo {$veiculo->matricula} entrou na Hotlist por falta de seguro.",
+                        'aviso',
+                        'hotlist'
+                    );
+                }
+            }
+        } else if ($estado === 'Activa' && $hotlistAtiva) {
+            // Se o seguro foi renovado, tira da Hotlist
+            $hotlistAtiva->update(['estado' => 'resolvido', 'resolvido_em' => now()]);
+        }
+    }
+
     private function formatar(Apolice $a): array
     {
         $v = $a->veiculo;
-
         return [
             'id'          => (string) $a->id,
             'numero'      => $a->numero,
@@ -308,9 +312,6 @@ class IssmApoliceController extends Controller
         ];
     }
 
-    /**
-     * KPIs — 1 query com SUM(CASE WHEN)
-     */
     private function kpis(): array
     {
         $r = Apolice::selectRaw("
@@ -343,14 +344,9 @@ class IssmApoliceController extends Controller
         return $query->orderByDesc('created_at')->limit(500)->get();
     }
 
-    /**
-     * Parse tolerante de datas: aceita `Y-m-d` e `d/m/Y`.
-     * Devolve null se inválida (em vez de rebentar).
-     */
     private function parseData(?string $data): ?Carbon
     {
         if (!$data) return null;
-
         try {
             if (preg_match('#^(\d{2})/(\d{2})/(\d{4})$#', $data, $m)) {
                 $data = "{$m[3]}-{$m[2]}-{$m[1]}";
@@ -361,27 +357,15 @@ class IssmApoliceController extends Controller
         }
     }
 
-    /**
-     * Calcula estado com base nas datas.
-     * 'Anulada' explícita prevalece sobre o cálculo.
-     */
     private function calcularEstado(Carbon $inicio, Carbon $fim, ?string $estadoManual = null): string
     {
-        if ($estadoManual === 'Anulada') {
-            return 'Anulada';
-        }
+        if ($estadoManual === 'Anulada') return 'Anulada';
 
         $hoje = now()->startOfDay();
 
-        if ($fim->lt($hoje)) {
-            return 'Expirada';
-        }
-        if ($inicio->gt($hoje)) {
-            return 'A expirar';  // ainda não começou
-        }
-        if ($fim->diffInDays($hoje) <= 30) {
-            return 'A expirar';  // expira nos próximos 30 dias
-        }
+        if ($fim->lt($hoje))  return 'Expirada';
+        if ($inicio->gt($hoje)) return 'A expirar';
+        if ($fim->diffInDays($hoje) <= 30) return 'A expirar';
         return 'Activa';
     }
 }

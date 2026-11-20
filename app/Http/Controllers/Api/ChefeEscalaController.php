@@ -5,15 +5,22 @@ namespace App\Http\Controllers\Api;
 use App\Exports\DadosExport;
 use App\Http\Controllers\Controller;
 use App\Models\Escala;
+use App\Models\Posto;
+use App\Services\SicamIAService;
 use Barryvdh\DomPDF\Facade\Pdf;
 use Illuminate\Http\Request;
 use Maatwebsite\Excel\Facades\Excel;
 
 class ChefeEscalaController extends Controller
 {
-    private const PERFIL_AGENTE = 30003;
-
     private const DIAS_PADRAO = ['Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb', 'Dom'];
+
+    protected SicamIAService $ia;
+
+    public function __construct(SicamIAService $ia)
+    {
+        $this->ia = $ia;
+    }
 
     /**
      * GET /api/chefe/escalas
@@ -126,7 +133,6 @@ class ChefeEscalaController extends Controller
     {
         $e = Escala::findOrFail($id);
         $e->delete();
-
         return response()->json(['ok' => true]);
     }
 
@@ -142,6 +148,47 @@ class ChefeEscalaController extends Controller
             'id'     => (string) $e->id,
             'escala' => $this->formatar($e->load('agente')),
         ]);
+    }
+
+    /**
+     * GET /api/chefe/escalas/catalogos
+     */
+    public function catalogos()
+    {
+        return response()->json([
+            'postos' => Posto::orderBy('nome')->pluck('nome')->toArray(),
+        ]);
+    }
+
+    /**
+     * GET /api/chefe/escalas/resumo-ia
+     */
+    public function resumoIA(Request $request)
+    {
+        $escalas = Escala::with('agente:id,name')->get();
+        $total = $escalas->count();
+        $postos = Posto::pluck('nome')->toArray();
+
+        $dadosEscalas = $escalas->map(function ($e) {
+            $atribuicoes = is_string($e->atribuicoes) ? json_decode($e->atribuicoes, true) : $e->atribuicoes;
+            $diasAtivos = collect($atribuicoes)->where('ativo', true)->count();
+            $turnos = collect($atribuicoes)->where('ativo', true)->pluck('turno')->unique()->values()->toArray();
+
+            return [
+                'agente'      => $e->agente?->name ?? '—',
+                'posto'       => $e->posto,
+                'dias_ativos' => $diasAtivos,
+                'turnos'      => $turnos,
+            ];
+        })->toArray();
+
+        $resposta = $this->ia->analisarEscalas([
+            'postos'        => $postos,
+            'total_escalas' => $total,
+            'escalas'       => $dadosEscalas,
+        ]);
+
+        return response()->json($resposta);
     }
 
     /**
@@ -179,11 +226,9 @@ class ChefeEscalaController extends Controller
             ];
         }
 
-        $nomeFicheiro = sprintf('escalas-turno-%s.xlsx', date('Y-m-d'));
-
         return Excel::download(
             new DadosExport($linhas, $cabecalhos, 'Escalas de Turno'),
-            $nomeFicheiro,
+            sprintf('escalas-turno-%s.xlsx', date('Y-m-d')),
         );
     }
 
@@ -268,13 +313,8 @@ class ChefeEscalaController extends Controller
         ], self::DIAS_PADRAO);
     }
 
-    /**
-     * KPIs — 2 queries em vez de 4.
-     * (total + publicadas + rascunhos numa só, e cobertura noutra)
-     */
     private function kpis(): array
     {
-        // 1 query — total, publicadas, rascunhos
         $row = Escala::selectRaw("
             COUNT(*) as total,
             SUM(CASE WHEN estado = 'Publicada' THEN 1 ELSE 0 END) as publicadas,
@@ -285,18 +325,15 @@ class ChefeEscalaController extends Controller
         $publicadas = (int) $row->publicadas;
         $rascunhos  = (int) $row->rascunhos;
 
-        // Cobertura — precisa de iterar as atribuições (JSON)
         $cobertura = 0;
         if ($total > 0) {
             $atribuicoes = Escala::pluck('atribuicoes');
-
             $soma = 0;
             foreach ($atribuicoes as $atr) {
                 $lista = is_string($atr) ? json_decode($atr, true) : $atr;
                 if (!is_array($lista)) continue;
                 $soma += count(array_filter($lista, fn ($a) => !empty($a['ativo'])));
             }
-
             $mediaPorEscala = $soma / $total;
             $cobertura = round(($mediaPorEscala / 7) * 100, 1);
         }
@@ -320,10 +357,7 @@ class ChefeEscalaController extends Controller
             $query->where('posto', $request->posto);
         }
 
-        return $query
-            ->orderByDesc('created_at')
-            ->limit(500)
-            ->get();
+        return $query->orderByDesc('created_at')->limit(500)->get();
     }
 
     private function diaTurno($porDia, string $dia): string

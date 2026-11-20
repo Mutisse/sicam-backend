@@ -17,7 +17,7 @@ use App\Http\Controllers\Api\PrmHotlistController;
 use App\Http\Controllers\Api\PrmAbordagemController;
 use App\Http\Controllers\Api\PrmAlertaController;
 use App\Http\Controllers\Api\PrmRelatorioController;
-use App\Http\Controllers\Api\InatroVeiculoController; 
+use App\Http\Controllers\Api\InatroVeiculoController;
 use App\Http\Controllers\Api\InatroCatalogoController;
 use App\Http\Controllers\Api\InatroInspecaoController;
 use App\Http\Controllers\Api\InatroAgendamentoController;
@@ -57,8 +57,12 @@ use App\Http\Controllers\Api\AgenteAutoController;
 use App\Http\Controllers\Api\AgenteHistoricoController;
 use App\Http\Controllers\Api\IssmCatalogoController;
 use App\Http\Controllers\Api\PrmPostoController;
+use App\Http\Controllers\Api\AgenteChatController;
+use App\Http\Controllers\Api\AgenteMultaController;
+use App\Http\Controllers\Api\AgenteFluxoController;
 
 use Illuminate\Support\Facades\Route;
+
 
 // ============================================================
 // AUTENTICAÇÃO
@@ -75,16 +79,17 @@ Route::prefix('auth')->group(function () {
 // ============================================================
 // PERFIL DO UTILIZADOR
 // ============================================================
-Route::prefix('perfil')->middleware(['auth:sanctum', 'throttle:api'])->group(function () {
-    Route::get('/',                  [PerfilController::class, 'obter']);
-    Route::put('/',                  [PerfilController::class, 'actualizar']);
-    Route::put('/senha',             [PerfilController::class, 'alterarSenha']);
-    Route::get('/sessoes',           [PerfilController::class, 'sessoes']);
+Route::prefix('perfil')->middleware('auth:sanctum')->group(function () {
+    Route::get('/', [PerfilController::class, 'obter']);
+    Route::get('/resumo-ia', [PerfilController::class, 'resumoIA']);
+    Route::put('/', [PerfilController::class, 'actualizar']);
+    Route::put('/senha', [PerfilController::class, 'alterarSenha']);
+    Route::get('/sessoes', [PerfilController::class, 'sessoes']);
+    Route::delete('/sessoes/{id}', [PerfilController::class, 'terminarSessao']);
     Route::delete('/sessoes/outras', [PerfilController::class, 'terminarOutrasSessoes']);
-    Route::delete('/sessoes/{id}',   [PerfilController::class, 'terminarSessao']);
-    Route::get('/preferencias',      [PerfilController::class, 'preferencias']);
-    Route::put('/preferencias',      [PerfilController::class, 'guardarPreferencias']);
-    Route::post('/foto',             [PerfilController::class, 'uploadFoto']);
+    Route::get('/preferencias', [PerfilController::class, 'preferencias']);
+    Route::put('/preferencias', [PerfilController::class, 'guardarPreferencias']);
+    Route::post('/foto', [PerfilController::class, 'uploadFoto']);
 });
 
 // ============================================================
@@ -93,6 +98,7 @@ Route::prefix('perfil')->middleware(['auth:sanctum', 'throttle:api'])->group(fun
 Route::prefix('notificacoes')->middleware(['auth:sanctum', 'throttle:api'])->group(function () {
     Route::get('/',                 [NotificacaoController::class, 'index']);
     Route::get('/contagem',         [NotificacaoController::class, 'contagem']);
+    Route::get('/resumo-ia',        [NotificacaoController::class, 'resumoIA']);
     Route::put('/ler-todas',        [NotificacaoController::class, 'marcarTodasLidas']);
     Route::put('/{id}/ler',         [NotificacaoController::class, 'marcarLida']);
     Route::delete('/{id}',          [NotificacaoController::class, 'destroy']);
@@ -109,8 +115,7 @@ Route::prefix('dashboard')->middleware(['auth:sanctum', 'throttle:api'])->group(
     Route::get('/prm',     [PrmController::class, 'dashboard']);
     Route::get('/gestmul', [GestmulController::class, 'dashboard']);
     Route::get('/chefe',   [ChefeController::class, 'dashboard']);
-
-    // ⭐ ROTA DOS CATÁLOGOS PARA O DASHBOARD (Províncias e Postos)
+    Route::get('/chefe/resumo-ia', [DashboardController::class, 'resumoIAChefe']);
     Route::get('/catalogos', [DashboardController::class, 'catalogos']);
 });
 
@@ -118,56 +123,60 @@ Route::prefix('dashboard')->middleware(['auth:sanctum', 'throttle:api'])->group(
 // HOTLIST
 // ============================================================
 Route::prefix('hotlist')->middleware(['auth:sanctum', 'throttle:api'])->group(function () {
-    Route::get('/',              [PrmHotlistController::class, 'index']); 
-    Route::get('/kpis',          [PrmHotlistController::class, 'kpisEndpoint']); 
-    Route::post('/',             [PrmHotlistController::class, 'store']); 
-    Route::put('/{id}',          [PrmHotlistController::class, 'update']); 
-    Route::put('/{id}/resolver', [PrmHotlistController::class, 'resolver']); 
-    Route::delete('/{id}',       [PrmHotlistController::class, 'destroy']); 
+    Route::get('/',              [PrmHotlistController::class, 'index']);
+    Route::get('/kpis',          [PrmHotlistController::class, 'kpisEndpoint']);
+    Route::get('/resumo-ia',     [PrmHotlistController::class, 'resumoIA']); // ⭐ NOVO
+    Route::post('/',             [PrmHotlistController::class, 'store']);
+    Route::put('/{id}',          [PrmHotlistController::class, 'update']);
+    Route::put('/{id}/resolver', [PrmHotlistController::class, 'resolver']);
+    Route::delete('/{id}',       [PrmHotlistController::class, 'destroy']);
 });
 
 // ============================================================
 // ABORDAGENS
 // ============================================================
 Route::prefix('abordagens')->middleware(['auth:sanctum', 'throttle:api'])->group(function () {
-    Route::get('/',        [PrmAbordagemController::class, 'index']); 
-    Route::post('/',       [PrmAbordagemController::class, 'store']); 
-    Route::delete('/{id}', [PrmAbordagemController::class, 'destroy']); 
+    Route::post('/ia',            [PrmAbordagemController::class, 'analisarIA']);
+    Route::post('/mapa/ia',       [PrmAbordagemController::class, 'analisarMapaIA']); // ⭐ NOVO
+    Route::get('/xlsx',           [PrmAbordagemController::class, 'xlsx']);
+    Route::get('/',               [PrmAbordagemController::class, 'index']);
+    Route::post('/',              [PrmAbordagemController::class, 'store']);
+    Route::delete('/{id}',        [PrmAbordagemController::class, 'destroy']);
 });
 
 // ============================================================
 // ALERTAS
 // ============================================================
 Route::prefix('alertas')->middleware(['auth:sanctum', 'throttle:api'])->group(function () {
-    Route::get('/',              [PrmAlertaController::class, 'index']); 
-    Route::put('/ler-todos',     [PrmAlertaController::class, 'marcarTodosLidos']); 
-    Route::put('/{id}/ler',      [PrmAlertaController::class, 'marcarLido']); 
-    Route::put('/{id}/nao-lido', [PrmAlertaController::class, 'marcarNaoLido']); 
+    Route::get('/',              [PrmAlertaController::class, 'index']);
+    Route::put('/ler-todos',     [PrmAlertaController::class, 'marcarTodosLidos']);
+    Route::put('/{id}/ler',      [PrmAlertaController::class, 'marcarLido']);
+    Route::put('/{id}/nao-lido', [PrmAlertaController::class, 'marcarNaoLido']);
 });
 
 // ============================================================
 // VEÍCULOS
 // ============================================================
 Route::prefix('veiculos')->middleware(['auth:sanctum', 'throttle:api'])->group(function () {
-    Route::get('/',      [InatroVeiculoController::class, 'index']); 
-    Route::post('/',     [InatroVeiculoController::class, 'store']); 
-    Route::get('/{id}',  [InatroVeiculoController::class, 'show']); 
+    Route::get('/',      [InatroVeiculoController::class, 'index']);
+    Route::post('/',     [InatroVeiculoController::class, 'store']);
+    Route::get('/{id}',  [InatroVeiculoController::class, 'show']);
 });
 
 // ============================================================
 // CATÁLOGOS (público INATRO)
 // ============================================================
-Route::get('/catalogos', [InatroCatalogoController::class, 'index'])->middleware('throttle:api'); 
+Route::get('/catalogos', [InatroCatalogoController::class, 'index'])->middleware('throttle:api');
 
 // ============================================================
 // INSPEÇÕES
 // ============================================================
 Route::prefix('inspecoes')->middleware('throttle:api')->group(function () {
-    Route::get('/',          [InatroInspecaoController::class, 'index']); 
-    Route::get('/kpis',      [InatroInspecaoController::class, 'kpis']); 
-    Route::get('/checklist', [InatroInspecaoController::class, 'checklist']); 
-    Route::post('/',         [InatroInspecaoController::class, 'store']); 
-    Route::get('/{id}',      [InatroInspecaoController::class, 'show']); 
+    Route::get('/',          [InatroInspecaoController::class, 'index']);
+    Route::get('/kpis',      [InatroInspecaoController::class, 'kpis']);
+    Route::get('/checklist', [InatroInspecaoController::class, 'checklist']);
+    Route::post('/',         [InatroInspecaoController::class, 'store']);
+    Route::get('/{id}',      [InatroInspecaoController::class, 'show']);
 });
 Route::get('/checklist', [ChecklistController::class, 'index'])->middleware('throttle:api');
 
@@ -175,26 +184,26 @@ Route::get('/checklist', [ChecklistController::class, 'index'])->middleware('thr
 // AGENDAMENTOS
 // ============================================================
 Route::prefix('agendamentos')->middleware('throttle:api')->group(function () {
-    Route::get('/',               [InatroAgendamentoController::class, 'index']); 
-    Route::get('/kpis',           [InatroAgendamentoController::class, 'kpis']); 
-    Route::post('/',              [InatroAgendamentoController::class, 'store']); 
-    Route::get('/{id}',           [InatroAgendamentoController::class, 'show']); 
-    Route::put('/{id}',           [InatroAgendamentoController::class, 'update']); 
-    Route::delete('/{id}',        [InatroAgendamentoController::class, 'destroy']); 
-    Route::put('/{id}/confirmar', [InatroAgendamentoController::class, 'confirmar']); 
-    Route::put('/{id}/concluir',  [InatroAgendamentoController::class, 'concluir']); 
-    Route::put('/{id}/cancelar',  [InatroAgendamentoController::class, 'cancelar']); 
+    Route::get('/',               [InatroAgendamentoController::class, 'index']);
+    Route::get('/kpis',           [InatroAgendamentoController::class, 'kpis']);
+    Route::post('/',              [InatroAgendamentoController::class, 'store']);
+    Route::get('/{id}',           [InatroAgendamentoController::class, 'show']);
+    Route::put('/{id}',           [InatroAgendamentoController::class, 'update']);
+    Route::delete('/{id}',        [InatroAgendamentoController::class, 'destroy']);
+    Route::put('/{id}/confirmar', [InatroAgendamentoController::class, 'confirmar']);
+    Route::put('/{id}/concluir',  [InatroAgendamentoController::class, 'concluir']);
+    Route::put('/{id}/cancelar',  [InatroAgendamentoController::class, 'cancelar']);
 });
 
 // ============================================================
 // EXPORTAÇÕES
 // ============================================================
 Route::prefix('exportacoes')->middleware('throttle:api')->group(function () {
-    Route::get('/',        [InatroExportacaoController::class, 'index']); 
-    Route::post('/',       [InatroExportacaoController::class, 'store']); 
-    Route::post('/xlsx',   [InatroExportacaoController::class, 'gerarXlsx']); 
-    Route::post('/pdf',    [InatroExportacaoController::class, 'gerarPdf']); 
-    Route::delete('/{id}', [InatroExportacaoController::class, 'destroy']); 
+    Route::get('/',        [InatroExportacaoController::class, 'index']);
+    Route::post('/',       [InatroExportacaoController::class, 'store']);
+    Route::post('/xlsx',   [InatroExportacaoController::class, 'gerarXlsx']);
+    Route::post('/pdf',    [InatroExportacaoController::class, 'gerarPdf']);
+    Route::delete('/{id}', [InatroExportacaoController::class, 'destroy']);
 });
 
 // ============================================================
@@ -202,15 +211,25 @@ Route::prefix('exportacoes')->middleware('throttle:api')->group(function () {
 // ============================================================
 Route::prefix('relatorios')->middleware('throttle:api')->group(function () {
     Route::get('/inatro/dashboard', [RelatorioInatroController::class, 'dashboard']);
-    Route::get('/prm',              [PrmRelatorioController::class, 'prm']); 
-    Route::get('/chefe',      [ChefeRelatorioController::class, 'index']);
-    Route::get('/chefe/pdf',  [ChefeRelatorioController::class, 'pdf']);
-    Route::get('/chefe/xlsx', [ChefeRelatorioController::class, 'xlsx']);
+
+    // ─── PRM ─────────────────────────────────────
+    Route::get('/prm',              [PrmRelatorioController::class, 'prm']);
+    Route::post('/prm/ia',          [PrmRelatorioController::class, 'analisarIA']);  // ⭐ NOVO
+
+    // ─── CHEFE ───────────────────────────────────
+    Route::get('/chefe',            [ChefeRelatorioController::class, 'index']);
+    Route::get('/chefe/pdf',        [ChefeRelatorioController::class, 'pdf']);
+    Route::get('/chefe/xlsx',       [ChefeRelatorioController::class, 'xlsx']);
+    Route::get('/chefe/resumo-ia',  [ChefeRelatorioController::class, 'resumoIA']);
+
+    // ─── ISSM ────────────────────────────────────
     Route::prefix('issm')->group(function () {
         Route::get('/',     [IssmRelatorioController::class, 'index']);
         Route::get('/xlsx', [IssmRelatorioController::class, 'xlsx']);
         Route::get('/pdf',  [IssmRelatorioController::class, 'pdf']);
     });
+
+    // ─── GESTMUL ─────────────────────────────────
     Route::get('/gestmul',      [GestmulRelatorioController::class, 'index']);
     Route::get('/gestmul/xlsx', [GestmulRelatorioController::class, 'xlsx']);
     Route::get('/gestmul/pdf',  [GestmulRelatorioController::class, 'pdf']);
@@ -223,61 +242,101 @@ Route::get('/prm/postos', [PrmPostoController::class, 'index'])
     ->middleware(['auth:sanctum', 'throttle:api']);
 
 // ============================================================
-// CHEFE — AGENTES, ESCALAS, PATRULHAS...
+// CHEFE — AGENTES, ESCALAS, PATRULHAS... (BLOCO ÚNICO E CORRIGIDO)
 // ============================================================
-Route::prefix('chefe/agentes')->middleware('throttle:api')->group(function () {
-    Route::get('/',                [ChefeAgenteController::class, 'index']);
-    Route::post('/',               [ChefeAgenteController::class, 'store']);
-    Route::get('/{id}',            [ChefeAgenteController::class, 'show']);
-    Route::put('/{id}',            [ChefeAgenteController::class, 'update']);
-    Route::delete('/{id}',         [ChefeAgenteController::class, 'destroy']);
-    Route::put('/{id}/activar',    [ChefeAgenteController::class, 'activar']);
-    Route::put('/{id}/desactivar', [ChefeAgenteController::class, 'desactivar']);
+Route::prefix('chefe')->middleware(['auth:sanctum', 'throttle:api'])->group(function () {
+
+    // ------------------------------------------------------------
+    // AGENTES
+    // ------------------------------------------------------------
+    Route::get('/agentes',                    [ChefeAgenteController::class, 'index']);
+    Route::post('/agentes',                   [ChefeAgenteController::class, 'store']);
+
+    // Específicas (antes do {id})
+    Route::get('/agentes/xlsx',               [ChefeAgenteController::class, 'xlsx']);
+
+    // Dinâmicas
+    Route::get('/agentes/{id}',               [ChefeAgenteController::class, 'show']);
+    Route::put('/agentes/{id}',               [ChefeAgenteController::class, 'update']);
+    Route::delete('/agentes/{id}',            [ChefeAgenteController::class, 'destroy']);
+    Route::put('/agentes/{id}/activar',       [ChefeAgenteController::class, 'activar']);
+    Route::put('/agentes/{id}/desactivar',    [ChefeAgenteController::class, 'desactivar']);
+    Route::get('/agentes/{id}/resumo-ia',     [ChefeAgenteController::class, 'resumoIA']);
+
+    // Catálogos
+    Route::get('/catalogos',                  [ChefeAgenteController::class, 'catalogos']);
+
+    // ------------------------------------------------------------
+    // ESCALAS
+    // ------------------------------------------------------------
+    Route::get('/escalas',                    [ChefeEscalaController::class, 'index']);
+    Route::post('/escalas',                   [ChefeEscalaController::class, 'store']);
+
+    // Específicas primeiro
+    Route::get('/escalas/catalogos',          [ChefeEscalaController::class, 'catalogos']);
+    Route::get('/escalas/resumo-ia',          [ChefeEscalaController::class, 'resumoIA']);
+    Route::get('/escalas/xlsx',               [ChefeEscalaController::class, 'xlsx']);
+    Route::get('/escalas/pdf',                [ChefeEscalaController::class, 'pdf']);
+
+    // Dinâmicas depois
+    Route::get('/escalas/{id}',               [ChefeEscalaController::class, 'show']);
+    Route::put('/escalas/{id}',               [ChefeEscalaController::class, 'update']);
+    Route::delete('/escalas/{id}',            [ChefeEscalaController::class, 'destroy']);
+    Route::put('/escalas/{id}/publicar',      [ChefeEscalaController::class, 'publicar']);
+
+    // ------------------------------------------------------------
+    // PATRULHAS
+    // ------------------------------------------------------------
+    Route::get('/patrulhas',                  [ChefePatrulhaController::class, 'index']);
+    Route::post('/patrulhas',                 [ChefePatrulhaController::class, 'store']);
+
+    // Específicas (ANTES do {id})
+    Route::get('/patrulhas/resumo-ia',        [ChefePatrulhaController::class, 'resumoIA']);
+    Route::get('/patrulhas/xlsx',             [ChefePatrulhaController::class, 'xlsx']);
+    Route::get('/patrulhas/pdf',              [ChefePatrulhaController::class, 'pdf']);
+
+    // Dinâmicas depois
+    Route::get('/patrulhas/{id}',             [ChefePatrulhaController::class, 'show']);
+    Route::put('/patrulhas/{id}',             [ChefePatrulhaController::class, 'update']);
+    Route::delete('/patrulhas/{id}',          [ChefePatrulhaController::class, 'destroy']);
+    Route::put('/patrulhas/{id}/iniciar',     [ChefePatrulhaController::class, 'iniciar']);
+    Route::put('/patrulhas/{id}/concluir',    [ChefePatrulhaController::class, 'concluir']);
+    Route::put('/patrulhas/{id}/cancelar',    [ChefePatrulhaController::class, 'cancelar']);
 });
 
-Route::prefix('chefe/escalas')->middleware('throttle:api')->group(function () {
-    Route::get('/',              [ChefeEscalaController::class, 'index']);
-    Route::post('/',             [ChefeEscalaController::class, 'store']);
-    Route::get('/xlsx',          [ChefeEscalaController::class, 'xlsx']);
-    Route::get('/pdf',           [ChefeEscalaController::class, 'pdf']);
-    Route::get('/{id}',          [ChefeEscalaController::class, 'show']);
-    Route::put('/{id}',          [ChefeEscalaController::class, 'update']);
-    Route::delete('/{id}',       [ChefeEscalaController::class, 'destroy']);
-    Route::put('/{id}/publicar', [ChefeEscalaController::class, 'publicar']);
-});
-
-Route::prefix('chefe/patrulhas')->middleware('throttle:api')->group(function () {
-    Route::get('/',              [ChefePatrulhaController::class, 'index']);
-    Route::post('/',             [ChefePatrulhaController::class, 'store']);
-    Route::get('/xlsx',          [ChefePatrulhaController::class, 'xlsx']);
-    Route::get('/pdf',           [ChefePatrulhaController::class, 'pdf']);
-    Route::get('/{id}',          [ChefePatrulhaController::class, 'show']);
-    Route::put('/{id}',          [ChefePatrulhaController::class, 'update']);
-    Route::delete('/{id}',       [ChefePatrulhaController::class, 'destroy']);
-    Route::put('/{id}/iniciar',  [ChefePatrulhaController::class, 'iniciar']);
-    Route::put('/{id}/concluir', [ChefePatrulhaController::class, 'concluir']);
-    Route::put('/{id}/cancelar', [ChefePatrulhaController::class, 'cancelar']);
-});
-
+// ============================================================
+// VEÍCULOS CRÍTICOS
+// ============================================================
 Route::prefix('chefe/veiculos-criticos')->middleware('throttle:api')->group(function () {
     Route::get('/',                        [ChefeVeiculoCriticoController::class, 'index']);
     Route::post('/',                       [ChefeVeiculoCriticoController::class, 'store']);
     Route::get('/xlsx',                    [ChefeVeiculoCriticoController::class, 'xlsx']);
     Route::get('/pdf',                     [ChefeVeiculoCriticoController::class, 'pdf']);
+
+    // ⭐ ESTA ROTA TEM DE ESTAR ANTES DO {id}
+    Route::get('/resumo-ia',               [ChefeVeiculoCriticoController::class, 'resumoIA']);
+
+    // Agora as rotas dinâmicas
     Route::get('/{id}',                    [ChefeVeiculoCriticoController::class, 'show']);
     Route::put('/{id}',                    [ChefeVeiculoCriticoController::class, 'update']);
     Route::delete('/{id}',                 [ChefeVeiculoCriticoController::class, 'destroy']);
     Route::put('/{id}/abater-hotlist',     [ChefeVeiculoCriticoController::class, 'abaterHotlist']);
     Route::put('/{id}/regularizar-seguro', [ChefeVeiculoCriticoController::class, 'regularizarSeguro']);
 });
-
+// ============================================================
+// APROVAÇÕES
+// ============================================================
 Route::prefix('chefe/aprovacoes')->middleware('throttle:api')->group(function () {
     Route::get('/',              [ChefeAprovacaoController::class, 'index']);
+
+    // ⭐ ROTA DA IA (TEM DE ESTAR ANTES DO {id})
+    Route::get('/resumo-ia',     [ChefeAprovacaoController::class, 'resumoIA']);
+
+    // Dinâmicas DEPOIS
     Route::get('/{id}',          [ChefeAprovacaoController::class, 'show']);
     Route::put('/{id}/aprovar',  [ChefeAprovacaoController::class, 'aprovar']);
     Route::put('/{id}/rejeitar', [ChefeAprovacaoController::class, 'rejeitar']);
 });
-
 // ============================================================
 // ISSM
 // ============================================================
@@ -456,25 +515,53 @@ Route::prefix('portal')->middleware('throttle:api')->group(function () {
         ->middleware('auth:sanctum');
 });
 
+
 // ============================================================
 // AGENTE
 // ============================================================
 Route::prefix('agente')->middleware(['auth:sanctum', 'throttle:api'])->group(function () {
-    Route::get('/inicio',                       [AgenteInicioController::class, 'index']);
-    Route::post('/consultas/registar',          [AgenteInicioController::class, 'registarConsulta']);
-    Route::get('/consulta/{matricula}',         [AgenteConsultaController::class, 'consultar']);
+
+    // Painel e Histórico
+    Route::get('/inicio', [AgenteInicioController::class, 'index']);
+    Route::post('/consultas/registar', [AgenteInicioController::class, 'registarConsulta']);
+
+    // Consultas
+    Route::get('/consulta/{matricula}', [AgenteConsultaController::class, 'consultar']);
     Route::get('/consulta/{matricula}/detalhe', [AgenteConsultaController::class, 'detalheCompleto']);
+    Route::get('/consulta/{matricula}/analise-ia', [AgenteConsultaController::class, 'analiseIA']);
+
+    // OCR (Câmara -> IA)
+    Route::post('/ocr', [AgenteFluxoController::class, 'ocr']);
 });
 
 Route::prefix('agente/autos')->middleware(['auth:sanctum', 'throttle:api'])->group(function () {
     Route::get('/',              [AgenteAutoController::class, 'index']);
     Route::post('/',             [AgenteAutoController::class, 'store']);
     Route::get('/{id}',          [AgenteAutoController::class, 'show']);
-    Route::put('/{id}/imprimir', [AgenteAutoController::class, 'imprimir']);
+    Route::get('/{id}/pdf',      [AgenteAutoController::class, 'pdf']);
 });
 
-Route::prefix('agente/historico')->middleware(['auth:sanctum', 'throttle:api'])->group(function () {
-    Route::get('/',     [AgenteHistoricoController::class, 'index']);
-    Route::post('/',    [AgenteHistoricoController::class, 'store']);
-    Route::get('/xlsx', [AgenteHistoricoController::class, 'xlsx']);
+
+Route::prefix('agente/historico')
+    ->middleware(['auth:sanctum', 'throttle:api'])
+    ->group(function () {
+        Route::get('/',          [AgenteHistoricoController::class, 'index']);
+        Route::post('/',         [AgenteHistoricoController::class, 'store']);
+        Route::get('/xlsx',      [AgenteHistoricoController::class, 'xlsx']);
+        Route::post('/analisar', [AgenteHistoricoController::class, 'analisar']);
+        Route::get('/pdf',       [AgenteHistoricoController::class, 'pdf']);
+    });
+
+Route::prefix('agente/chat')->middleware(['auth:sanctum', 'throttle:api'])->group(function () {
+    Route::get('/iniciar', [AgenteChatController::class, 'iniciar']);
+    Route::post('/',       [AgenteChatController::class, 'enviar']);
 });
+
+
+Route::prefix('agente/multa')
+    ->middleware(['auth:sanctum', 'throttle:api'])
+    ->group(function () {
+        Route::get('/sugerir', [AgenteMultaController::class, 'sugerir']);
+        Route::post('/',       [AgenteMultaController::class, 'store']);
+        Route::get('/{id}/pdf', [AgenteMultaController::class, 'pdf']);
+    });

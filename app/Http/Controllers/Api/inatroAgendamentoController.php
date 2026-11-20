@@ -3,105 +3,275 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
-use App\Models\Exportacao;
+use App\Models\Agendamento;
+use App\Models\Veiculo;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
 
-class InatroExportacaoController extends Controller
+class InatroAgendamentoController extends Controller
 {
+    /**
+     * GET /api/agendamentos
+     */
     public function index(Request $request)
     {
-        $query = Exportacao::with('criador:id,name')
-            ->when($request->filled('tipo'),    fn($q) => $q->where('tipo', $request->tipo))
-            ->when($request->filled('formato'), fn($q) => $q->where('formato', $request->formato))
-            ->when($request->filled('data_de'), fn($q) => $q->whereDate('data_de', '>=', $request->data_de))
-            ->when($request->filled('data_ate'), fn($q) => $q->whereDate('data_ate', '<=', $request->data_ate))
-            ->orderByDesc('created_at')
-            ->orderByDesc('id');
+        $query = Agendamento::query()
+            ->when($request->filled('q'), function ($q) use ($request) {
+                $termo = '%' . $request->q . '%';
+                $q->where(function ($sub) use ($termo) {
+                    $sub->where('matricula', 'like', $termo)
+                        ->orWhere('codigo', 'like', $termo)
+                        ->orWhere('proprietario', 'like', $termo);
+                });
+            })
+            ->when($request->filled('estado'), fn ($q) => $q->where('estado', $request->estado))
+            ->when($request->filled('posto'),  fn ($q) => $q->where('posto_nome', $request->posto))
+            ->when($request->filled('data'),   fn ($q) => $q->whereDate('data', $request->data))
+            ->orderByDesc('data')
+            ->orderByDesc('hora');
 
-        $porPagina = max(1, min((int) $request->input('per_page', 15), 100));
-        $pagina = $query->paginate($porPagina);
+        $items = $query->get()->map(fn (Agendamento $a) => $this->formatar($a))->values();
 
         return response()->json([
-            'data' => $pagina->items(),
-            'meta' => [
-                'total'        => $pagina->total(),
-                'por_pagina'   => $pagina->perPage(),
-                'pagina_atual' => $pagina->currentPage(),
-                'ultima'       => $pagina->lastPage(),
-            ],
+            'items' => $items,
+            'kpis'  => $this->kpis(),
         ]);
     }
 
+    /**
+     * GET /api/agendamentos/kpis
+     */
+    public function kpis()
+    {
+        $hoje = now()->toDateString();
+        $fimSemana = now()->addDays(7)->toDateString();
+
+        return [
+            'hoje'        => Agendamento::whereDate('data', $hoje)->count(),
+            'semana'      => Agendamento::whereDate('data', '>=', $hoje)->whereDate('data', '<=', $fimSemana)->count(),
+            'confirmados' => Agendamento::where('estado', 'Confirmado')->count(),
+            'cancelados'  => Agendamento::where('estado', 'Cancelado')->count(),
+            'concluidos'  => Agendamento::where('estado', 'Concluído')->count(),
+            'pendentes'   => Agendamento::where('estado', 'Pendente')->count(),
+        ];
+    }
+
+    /**
+     * POST /api/agendamentos
+     */
     public function store(Request $request)
     {
         $dados = $request->validate([
-            'tipo'              => ['required', 'string', 'max:50'],
-            'formato'           => ['required', Rule::in(['xlsx', 'pdf', 'csv'])],
-            'titulo'            => ['nullable', 'string', 'max:255'],
-            'detalhe'           => ['nullable', 'string'],
-            'data_de'           => ['nullable', 'date'],
-            'data_ate'          => ['nullable', 'date', 'after_or_equal:data_de'],
-            'incluir_cabecalho' => ['nullable', 'boolean'],
-            'incluir_resumo'    => ['nullable', 'boolean'],
-            'apenas_ativos'     => ['nullable', 'boolean'],
+            'matricula'    => ['required', 'string', 'max:20'],
+            'marca'        => ['nullable', 'string', 'max:60'],
+            'modelo'       => ['nullable', 'string', 'max:60'],
+            'proprietario' => ['nullable', 'string', 'max:120'],
+            'nif'          => ['nullable', 'string', 'max:20'],
+            'telefone'     => ['nullable', 'string', 'max:30'],
+            'data'         => ['required', 'date'],
+            'hora'         => ['required', 'string', 'max:10'],
+            'duracao'      => ['nullable', 'integer'],
+            'tipo'         => ['nullable', 'string', 'max:50'],
+            'posto_nome'   => ['nullable', 'string', 'max:120'],
+            'inspetor'     => ['nullable', 'string', 'max:120'],
+            'observacoes'  => ['nullable', 'string'],
         ]);
 
         try {
-            $exportacao = DB::transaction(function () use ($dados) {
-                $ano = now()->year;
-                $ultimo = Exportacao::where('codigo', 'like', "EXP-{$ano}-%")
-                    ->lockForUpdate()
-                    ->count();
-                $codigo = sprintf('EXP-%d-%04d', $ano, $ultimo + 1);
+            $agendamento = DB::transaction(function () use ($dados) {
+                $veiculo = Veiculo::where('matricula', $dados['matricula'])->first();
 
-                return Exportacao::create(array_merge($dados, [
-                    'codigo'            => $codigo,
-                    'incluir_cabecalho' => $dados['incluir_cabecalho'] ?? true,
-                    'incluir_resumo'    => $dados['incluir_resumo'] ?? true,
-                    'apenas_ativos'     => $dados['apenas_ativos'] ?? false,
-                    'total_registos'    => 0,
-                    'tamanho_bytes'     => 0,
-                    'criado_por'        => auth()->id(),
-                ]));
+                $ano = now()->year;
+                $ultimo = Agendamento::where('codigo', 'like', "AG-{$ano}-%")->lockForUpdate()->count();
+                $codigo = sprintf('AG-%d-%04d', $ano, $ultimo + 1);
+
+                return Agendamento::create([
+                    'codigo'       => $codigo,
+                    'veiculo_id'   => $veiculo?->id,
+                    'matricula'    => strtoupper($dados['matricula']),
+                    'marca'        => $dados['marca'] ?? $veiculo?->marca,
+                    'modelo'       => $dados['modelo'] ?? $veiculo?->modelo,
+                    'proprietario' => $dados['proprietario'] ?? $veiculo?->proprietario_nome,
+                    'nif'          => $dados['nif'] ?? $veiculo?->proprietario_numero_id,
+                    'telefone'     => $dados['telefone'] ?? null,
+                    'data'         => $dados['data'],
+                    'hora'         => $dados['hora'],
+                    'duracao'      => $dados['duracao'] ?? 30,
+                    'tipo'         => $dados['tipo'] ?? 'Periódica',
+                    'posto_nome'   => $dados['posto_nome'] ?? null,
+                    'inspetor'     => $dados['inspetor'] ?? null,
+                    'estado'       => 'Pendente',
+                    'observacoes'  => $dados['observacoes'] ?? null,
+                    'criado_por'   => auth()->id(),
+                ]);
             });
 
             return response()->json([
-                'message' => 'Pedido de exportação registado.',
-                'data'    => $exportacao,
+                'message' => 'Agendamento criado com sucesso.',
+                'data'    => $this->formatar($agendamento),
+                'kpis'    => $this->kpis(),
             ], 201);
         } catch (\Throwable $e) {
             return response()->json([
-                'message' => 'Falha ao registar exportação.',
+                'message' => 'Falha ao criar agendamento.',
                 'error'   => $e->getMessage(),
             ], 500);
         }
     }
 
-    public function gerarXlsx(Request $request)
+    /**
+     * GET /api/agendamentos/{id}
+     */
+    public function show($id)
     {
-        return $this->gerar($request, 'xlsx');
-    }
-    public function gerarPdf(Request $request)
-    {
-        return $this->gerar($request, 'pdf');
+        $a = Agendamento::find($id);
+        if (!$a) return response()->json(['message' => 'Agendamento não encontrado.'], 404);
+        return response()->json($this->formatar($a));
     }
 
+    /**
+     * PUT /api/agendamentos/{id}
+     */
+    public function update(Request $request, $id)
+    {
+        $a = Agendamento::find($id);
+        if (!$a) return response()->json(['message' => 'Agendamento não encontrado.'], 404);
+
+        $dados = $request->validate([
+            'data'        => ['sometimes', 'date'],
+            'hora'        => ['sometimes', 'string', 'max:10'],
+            'posto_nome'  => ['nullable', 'string', 'max:120'],
+            'inspetor'    => ['nullable', 'string', 'max:120'],
+            'observacoes' => ['nullable', 'string'],
+        ]);
+
+        $a->update($dados);
+
+        return response()->json([
+            'message' => 'Agendamento atualizado.',
+            'data'    => $this->formatar($a->fresh()),
+            'kpis'    => $this->kpis(),
+        ]);
+    }
+
+    /**
+     * PUT /api/agendamentos/{id}/confirmar
+     */
+    public function confirmar($id)
+    {
+        $a = Agendamento::find($id);
+        if (!$a) return response()->json(['message' => 'Agendamento não encontrado.'], 404);
+        $a->update(['estado' => 'Confirmado']);
+
+        return response()->json([
+            'data' => $this->formatar($a->fresh()),
+            'kpis' => $this->kpis(),
+        ]);
+    }
+
+    /**
+     * PUT /api/agendamentos/{id}/concluir
+     */
+    public function concluir($id)
+    {
+        $a = Agendamento::find($id);
+        if (!$a) return response()->json(['message' => 'Agendamento não encontrado.'], 404);
+        $a->update(['estado' => 'Concluído']);
+
+        return response()->json([
+            'data' => $this->formatar($a->fresh()),
+            'kpis' => $this->kpis(),
+        ]);
+    }
+
+    /**
+     * PUT /api/agendamentos/{id}/cancelar
+     */
+    public function cancelar($id)
+    {
+        $a = Agendamento::find($id);
+        if (!$a) return response()->json(['message' => 'Agendamento não encontrado.'], 404);
+        $a->update(['estado' => 'Cancelado']);
+
+        return response()->json([
+            'data' => $this->formatar($a->fresh()),
+            'kpis' => $this->kpis(),
+        ]);
+    }
+
+    /**
+     * DELETE /api/agendamentos/{id}
+     */
     public function destroy($id)
     {
-        $exportacao = Exportacao::find($id);
-        if (!$exportacao) return response()->json(['message' => 'Exportação não encontrada.'], 404);
-        $exportacao->delete();
-        return response()->json(['message' => 'Exportação eliminada.']);
+        $a = Agendamento::find($id);
+        if (!$a) return response()->json(['message' => 'Agendamento não encontrado.'], 404);
+        
+        $a->delete();
+
+        return response()->json([
+            'ok'   => true,
+            'kpis' => $this->kpis(),
+        ]);
     }
 
-    private function gerar(Request $request, string $formato)
+    // ============================================================
+    // Helpers
+    // ============================================================
+
+    private function formatar(Agendamento $a): array
     {
-        // TODO: gerar realmente o ficheiro e atualizar total_registos + tamanho_bytes
-        return response()->json([
-            'message' => "Geração de {$formato} ainda não implementada.",
-            'formato' => $formato,
-        ], 501);
+        return [
+            'id'           => (string) $a->id,
+            'codigo'       => $a->codigo,
+            'matricula'    => $a->matricula,
+            'marca'        => $a->marca,
+            'modelo'       => $a->modelo,
+            'proprietario' => $a->proprietario,
+            'nif'          => $a->nif,
+            'telefone'     => $a->telefone,
+            'data'         => $a->data?->format('d/m/Y') ?? '',
+            'hora'         => $a->hora,
+            'duracao'      => $a->duracao,
+            'tipo'         => $a->tipo,
+            'posto'        => $a->posto_nome, // Frontend espera 'posto'
+            'inspetor'     => $a->inspetor,
+            'estado'       => $a->estado,
+            'observacoes'  => $a->observacoes,
+        ];
+    }
+
+    /**
+     * ⭐ Método interno chamado pelo PrmHotlistController quando o carro sai da Hotlist
+     */
+    public static function criarAgendamentoAutomatico(Veiculo $veiculo): void
+    {
+        $data = now()->addDays(2)->toDateString();
+        $hora = '09:00';
+
+        $ano = now()->year;
+        $ultimo = Agendamento::where('codigo', 'like', "AG-{$ano}-%")->count();
+        $codigo = sprintf('AG-%d-%04d', $ano, $ultimo + 1);
+
+        Agendamento::create([
+            'codigo'       => $codigo,
+            'veiculo_id'   => $veiculo->id,
+            'matricula'    => $veiculo->matricula,
+            'marca'        => $veiculo->marca,
+            'modelo'       => $veiculo->modelo,
+            'proprietario' => $veiculo->proprietario_nome,
+            'nif'          => $veiculo->proprietario_numero_id,
+            'telefone'     => null,
+            'data'         => $data,
+            'hora'         => $hora,
+            'duracao'      => 30,
+            'tipo'         => 'Reinspecção',
+            'posto_nome'   => 'Posto Central',
+            'inspetor'     => null,
+            'estado'       => 'Pendente',
+            'observacoes'  => 'Agendamento automático gerado após regularização da Hotlist.',
+            'criado_por'   => auth()->id() ?? 1,
+        ]);
     }
 }

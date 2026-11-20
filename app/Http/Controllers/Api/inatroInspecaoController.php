@@ -3,9 +3,10 @@
 namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
-use App\Models\ChecklistCampo;
 use App\Models\ChecklistSeccao;
+use App\Models\Hotlist;
 use App\Models\Inspecao;
+use App\Models\Veiculo;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
@@ -54,7 +55,6 @@ class InatroInspecaoController extends Controller
 
     /**
      * GET /api/inspecoes/kpis
-     * Contadores para os cards do topo (replica o dashboard INATRO).
      */
     public function kpis()
     {
@@ -79,7 +79,6 @@ class InatroInspecaoController extends Controller
 
     /**
      * GET /api/inspecoes/checklist
-     * Devolve as secções + campos do checklist para o formulário.
      */
     public function checklist()
     {
@@ -124,7 +123,7 @@ class InatroInspecaoController extends Controller
                 $validade = $dados['validade']
                     ?? date('Y-m-d', strtotime($dataInspecao . ' +1 year'));
 
-                return Inspecao::create([
+                $novaInspecao = Inspecao::create([
                     'codigo'           => $codigo,
                     'veiculo_id'       => $dados['veiculo_id'],
                     'posto_id'         => $dados['posto_id'] ?? null,
@@ -138,9 +137,34 @@ class InatroInspecaoController extends Controller
                     'checklist'        => $dados['checklist'] ?? null,
                     'inspetor'         => $dados['inspetor'] ?? (auth()->user()->name ?? null),
                 ]);
+
+                // ⭐ LÓGICA DE NEGÓCIO: Atualiza o Score e o Estado do Veículo
+                $veiculo = Veiculo::find($dados['veiculo_id']);
+
+                if ($veiculo) {
+                    $estaNaHotlist = Hotlist::where('veiculo_id', $veiculo->id)
+                        ->where('estado', 'ativo')
+                        ->exists();
+
+                    if ($dados['resultado'] === 'Aprovada') {
+                        if (!$estaNaHotlist) {
+                            $veiculo->update([
+                                'estado' => 'regular',
+                                'score'  => min(100, ($veiculo->score ?? 0) + 10),
+                            ]);
+                        }
+                    } else {
+                        // Reprovada → fica crítico
+                        $veiculo->update([
+                            'estado' => 'critico',
+                        ]);
+                    }
+                }
+
+                return $novaInspecao;
             });
 
-            // Recalcula o estado das inspecções do veículo com base na validade
+            // Recalcula o estado das inspecções antigas do veículo
             $this->atualizarEstadosDoVeiculo($inspecao->veiculo_id);
 
             $inspecao->load(['veiculo:id,matricula,marca,modelo', 'posto:id,nome']);

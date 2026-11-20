@@ -4,19 +4,28 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Models\Hotlist;
+use App\Models\Multa;
+use App\Models\User;
 use App\Models\Veiculo;
+use App\Services\SicamIAService;
 use Illuminate\Http\Request;
-use Illuminate\Validation\Rule;
+use Illuminate\Support\Facades\DB;
 
 class PrmHotlistController extends Controller
 {
+    protected SicamIAService $ia;
+
+    public function __construct(SicamIAService $ia)
+    {
+        $this->ia = $ia;
+    }
+
     /**
      * GET /api/hotlist
-     * Devolve { items, kpis } — contrato esperado pelo hotlist.service.ts.
      */
     public function index(Request $request)
     {
-        $query = Hotlist::with(['veiculo:id,matricula,marca,modelo,cor'])
+        $query = Hotlist::with(['veiculo:id,matricula,marca,modelo,cor,score'])
             ->when($request->filled('q'), function ($q) use ($request) {
                 $termo = '%' . $request->q . '%';
                 $q->where(function ($sub) use ($termo) {
@@ -37,6 +46,8 @@ class PrmHotlistController extends Controller
             $nivelMap = ['critica' => 'Alto', 'alta' => 'Alto', 'media' => 'Médio', 'baixa' => 'Baixo'];
             $estadoMap = ['ativo' => 'Ativo', 'resolvido' => 'Resolvido', 'arquivado' => 'Resolvido'];
 
+            $totalAbordagens = DB::table('abordagens')->where('veiculo_id', $h->veiculo_id)->count();
+
             return [
                 'id'           => (string) $h->id,
                 'matricula'    => $h->veiculo->matricula ?? '',
@@ -52,7 +63,7 @@ class PrmHotlistController extends Controller
                 'motivo'       => $h->motivo,
                 'nivel'        => $nivelMap[$h->prioridade] ?? 'Médio',
                 'estado'       => $estadoMap[$h->estado] ?? 'Ativo',
-                'abordagens'   => 0,
+                'abordagens'   => $totalAbordagens,
                 'observacoes'  => $h->descricao,
             ];
         })->values();
@@ -68,6 +79,55 @@ class PrmHotlistController extends Controller
                 'ativos'   => $items->where('estado', 'Ativo')->count(),
             ],
         ]);
+    }
+
+    /**
+     * GET /api/hotlist/resumo-ia
+     *
+     * ⭐ CORRIGIDO: Não usa auth()->user() nem $request->user().
+     * Apenas recolhe a hotlist e envia para a IA.
+     */
+    public function resumoIA()
+    {
+        $hotlist = Hotlist::with('veiculo')->where('estado', 'ativo')->orderByDesc('detectado_em')->get();
+
+        if ($hotlist->isEmpty()) {
+            return response()->json([
+                'resumo' => "Bom trabalho, comandante. Não há veículos ativos na Hotlist neste momento. A via está limpa. Sugiro aproveitar para reforçar a fiscalização de rotina nas zonas com maior incidência histórica.",
+            ]);
+        }
+
+        $total = $hotlist->count();
+        $furtados = $hotlist->where('motivo', 'Furtado')->count();
+        $clonagem = $hotlist->where('motivo', 'Clonagem suspeita')->count();
+        $mandados = $hotlist->where('motivo', 'Mandado de captura')->count();
+        $urgentes = $hotlist->whereIn('prioridade', ['critica', 'alta'])->count();
+
+        $dadosVeiculos = $hotlist->take(15)->map(function ($h) {
+            return [
+                'matricula'   => $h->veiculo?->matricula ?? '—',
+                'marca'       => $h->veiculo?->marca ?? '—',
+                'modelo'      => $h->veiculo?->modelo ?? '—',
+                'motivo'      => $h->motivo ?? '—',
+                'prioridade'  => $h->prioridade ?? '—',
+                'zona'        => $h->zona ?? '—',
+                'posto'       => $h->posto ?? '—',
+                'agente'      => $h->agente ?? '—',
+                'multas'      => $h->multas_pendentes ?? 0,
+                'valor'       => $h->valor_multas ?? 0,
+            ];
+        })->toArray();
+
+        $resposta = $this->ia->analisarHotlist([
+            'total'      => $total,
+            'furtados'   => $furtados,
+            'clonagem'   => $clonagem,
+            'mandados'   => $mandados,
+            'urgentes'   => $urgentes,
+            'veiculos'   => $dadosVeiculos,
+        ]);
+
+        return response()->json($resposta);
     }
 
     /**
@@ -87,7 +147,6 @@ class PrmHotlistController extends Controller
 
     /**
      * POST /api/hotlist
-     * Frontend envia: { matricula, motivo, perigo, descricao }
      */
     public function store(Request $request)
     {
@@ -99,30 +158,56 @@ class PrmHotlistController extends Controller
         ]);
 
         try {
-            $veiculo = Veiculo::where('matricula', $dados['matricula'])->firstOrFail();
+            $hotlist = DB::transaction(function () use ($dados, $request) {
+                $veiculo = Veiculo::where('matricula', $dados['matricula'])->firstOrFail();
 
-            // Mapear perigo → prioridade
-            $prioridadeMap = ['alto' => 'alta', 'medio' => 'media', 'baixo' => 'baixa'];
+                $multasPendentes = Multa::where('veiculo_id', $veiculo->id)
+                    ->where('estado', 'Pendente')
+                    ->count();
 
-            $hotlist = Hotlist::create([
-                'veiculo_id'       => $veiculo->id,
-                'motivo'           => $dados['motivo'],
-                'perigo'           => $dados['perigo'] ?? null,
-                'prioridade'       => $prioridadeMap[$dados['perigo'] ?? ''] ?? 'media',
-                'agente'           => auth()->user()->name ?? null,
-                'posto'            => null,
-                'zona'             => null,
-                'multas_pendentes' => 0,
-                'valor_multas'     => 0,
-                'estado'           => 'ativo',
-                'descricao'        => $dados['descricao'] ?? null,
-                'historico'        => [[
-                    'em'   => now()->toIso8601String(),
-                    'acao' => 'criado',
-                    'por'  => auth()->user()->name ?? 'sistema',
-                ]],
-                'detectado_em'     => now(),
-            ]);
+                $valorMultas = Multa::where('veiculo_id', $veiculo->id)
+                    ->where('estado', 'Pendente')
+                    ->sum('valor');
+
+                $prioridadeMap = ['alto' => 'critica', 'medio' => 'media', 'baixo' => 'baixa'];
+                $prioridade = $prioridadeMap[$dados['perigo'] ?? ''] ?? 'media';
+
+                $userName = $request->user()?->name ?? 'Sistema';
+
+                $novaHotlist = Hotlist::create([
+                    'veiculo_id'       => $veiculo->id,
+                    'motivo'           => $dados['motivo'],
+                    'perigo'           => $dados['perigo'] ?? null,
+                    'prioridade'       => $prioridade,
+                    'agente'           => $userName,
+                    'posto'            => null,
+                    'zona'             => null,
+                    'multas_pendentes' => $multasPendentes,
+                    'valor_multas'     => $valorMultas,
+                    'estado'           => 'ativo',
+                    'descricao'        => $dados['descricao'] ?? null,
+                    'historico'        => [[
+                        'em'   => now()->toIso8601String(),
+                        'acao' => 'criado',
+                        'por'  => $userName,
+                    ]],
+                    'detectado_em'     => now(),
+                ]);
+
+                $veiculo->update(['score' => 0, 'estado' => 'critico']);
+
+                $chefes = User::whereHas('perfil', fn ($q) => $q->where('key', 'chefe'))->get();
+                foreach ($chefes as $chefe) {
+                    $chefe->notificar(
+                        'Novo veículo na Hotlist',
+                        "O veículo {$veiculo->matricula} foi inserido na Hotlist. Motivo: {$dados['motivo']}.",
+                        'aviso',
+                        'hotlist'
+                    );
+                }
+
+                return $novaHotlist;
+            });
 
             return response()->json([
                 'id'   => (string) $hotlist->id,
@@ -138,7 +223,6 @@ class PrmHotlistController extends Controller
 
     /**
      * PUT /api/hotlist/{id}
-     * Frontend envia: { motivo, perigo, descricao }
      */
     public function update(Request $request, $id)
     {
@@ -154,15 +238,17 @@ class PrmHotlistController extends Controller
         ]);
 
         if (array_key_exists('perigo', $dados)) {
-            $map = ['alto' => 'alta', 'medio' => 'media', 'baixo' => 'baixa'];
+            $map = ['alto' => 'critica', 'medio' => 'media', 'baixo' => 'baixa'];
             $dados['prioridade'] = $map[$dados['perigo'] ?? ''] ?? 'media';
         }
+
+        $userName = $request->user()?->name ?? 'Sistema';
 
         $historico = $hotlist->historico ?? [];
         $historico[] = [
             'em'     => now()->toIso8601String(),
             'acao'   => 'atualizado',
-            'por'    => auth()->user()->name ?? 'sistema',
+            'por'    => $userName,
             'campos' => array_keys($dados),
         ];
 
@@ -188,22 +274,45 @@ class PrmHotlistController extends Controller
             return response()->json(['message' => 'Registo já está resolvido.'], 409);
         }
 
-        $historico = $hotlist->historico ?? [];
-        $historico[] = [
-            'em'   => now()->toIso8601String(),
-            'acao' => 'resolvido',
-            'por'  => auth()->user()->name ?? 'sistema',
-            'nota' => $request->input('nota'),
-        ];
+        DB::transaction(function () use ($hotlist, $request) {
+            $userName = $request->user()?->name ?? 'Sistema';
 
-        $hotlist->update([
-            'estado'       => 'resolvido',
-            'resolvido_em' => now(),
-            'historico'    => $historico,
-        ]);
+            $historico = $hotlist->historico ?? [];
+            $historico[] = [
+                'em'   => now()->toIso8601String(),
+                'acao' => 'resolvido',
+                'por'  => $userName,
+                'nota' => $request->input('nota'),
+            ];
+
+            $hotlist->update([
+                'estado'       => 'resolvido',
+                'resolvido_em' => now(),
+                'historico'    => $historico,
+            ]);
+
+            if ($hotlist->veiculo) {
+                $hotlist->veiculo->update([
+                    'estado' => 'pendente',
+                    'score'  => 50,
+                ]);
+
+                \App\Http\Controllers\Api\InatroAgendamentoController::criarAgendamentoAutomatico($hotlist->veiculo);
+
+                $chefes = User::whereHas('perfil', fn ($q) => $q->where('key', 'chefe'))->get();
+                foreach ($chefes as $chefe) {
+                    $chefe->notificar(
+                        'Hotlist resolvida e agendada',
+                        "O veículo {$hotlist->veiculo->matricula} saiu da Hotlist e foi agendado para reinspeção no INATRO.",
+                        'sucesso',
+                        'hotlist'
+                    );
+                }
+            }
+        });
 
         return response()->json([
-            'message' => 'Registo marcado como resolvido.',
+            'message' => 'Registo marcado como resolvido e veículo agendado para inspeção.',
             'data'    => $hotlist->fresh('veiculo:id,matricula,marca,modelo'),
         ]);
     }

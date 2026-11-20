@@ -6,19 +6,19 @@ namespace App\Http\Controllers\Api;
 use App\Http\Controllers\Controller;
 use App\Models\AutoNoticia;
 use App\Models\Veiculo;
-use App\Services\GeminiService;
-use App\Services\NotificacaoService;
+use App\Services\SicamIAService;
+use Barryvdh\DomPDF\Facade\Pdf;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
 class AgenteAutoController extends Controller
 {
-    protected GeminiService $geminiService;
+    protected SicamIAService $iaService;
 
-    public function __construct(GeminiService $geminiService)
+    public function __construct(SicamIAService $iaService)
     {
-        $this->geminiService = $geminiService;
+        $this->iaService = $iaService;
     }
 
     public function index(Request $request)
@@ -77,63 +77,32 @@ class AgenteAutoController extends Controller
             ]);
         });
 
-        $textoGerado = $this->geminiService->gerarTextoAuto([
-            'matricula'       => $auto->matricula,
-            'infracao_codigo' => $auto->infracao_codigo,
-            'infracao_label'  => $auto->infracao_label,
-            'valor'           => $auto->valor,
-            'local'           => $auto->local,
-            'posto'           => $auto->posto,
-            'observacoes'     => $auto->observacoes,
+        // ⭐ Recolher contexto do veículo para a IA
+        $veiculo = Veiculo::where('matricula', $auto->matricula)->first();
+        $dadosVeiculo = [
+            'matricula'         => $auto->matricula,
+            'score'             => $veiculo?->score ?? 0,
+            'multas_pendentes'  => $veiculo ? DB::table('multas')->where('veiculo_id', $veiculo->id)->where('estado', 'Pendente')->count() : 0,
+            'seguro_valido'     => false,
+            'inspecao_valida'   => false,
+        ];
+
+        $textoGerado = $this->iaService->gerarAutoNoticia([
+            'auto' => [
+                'codigo'         => $auto->codigo,
+                'matricula'      => $auto->matricula,
+                'infracao_label' => $auto->infracao_label,
+                'valor'          => $auto->valor,
+                'local'          => $auto->local,
+                'posto'          => $auto->posto,
+                'observacoes'    => $auto->observacoes,
+                'agente'         => $eu->name,
+            ],
+            'veiculo' => $dadosVeiculo,
         ]);
 
-        // ═══════════════════════════════════════════════════════
-        // 🔔 GATILHO — Multa emitida
-        //    1. Tenta notificar o cidadão proprietário (pelo NIF)
-        //    2. Se não existir conta, notifica gestores (gestmul/admin)
-        // ═══════════════════════════════════════════════════════
-        $matricula   = $auto->matricula;
-        $infracaoLbl = $auto->infracao_label;
-        $valor       = (float) $auto->valor;
-        $codigoAuto  = $auto->codigo;
-
-        dispatch(function () use ($matricula, $infracaoLbl, $valor, $codigoAuto) {
-            $veiculo = Veiculo::where('matricula', $matricula)->first();
-            $nif = $veiculo?->proprietario_numero_id;
-
-            // 1. Cidadão proprietário (pelo NIF)
-            $userCidadao = $nif
-                ? \App\Models\User::where('nif', $nif)->first()
-                : null;
-
-            if ($userCidadao) {
-                \App\Models\Notificacao::criarMultiplas(
-                    [$userCidadao->id],
-                    'Nova multa no seu veículo',
-                    "Foi emitida a multa {$codigoAuto} por {$infracaoLbl} no veículo {$matricula}. Valor: " . number_format($valor, 2, ',', '.') . ' MT.',
-                    'critico',
-                    'multa',
-                    $matricula
-                );
-                return;
-            }
-
-            // 2. Fallback — gestores de multas e admins
-            $destinatarios = \App\Models\User::whereHas('perfil', function ($q) {
-                $q->whereIn('key', ['gestmul', 'admin']);
-            })->pluck('id')->toArray();
-
-            if (!empty($destinatarios)) {
-                \App\Models\Notificacao::criarMultiplas(
-                    $destinatarios,
-                    'Nova multa emitida (proprietário sem conta)',
-                    "Multa {$codigoAuto} por {$infracaoLbl} no veículo {$matricula} (proprietário: {$veiculo?->proprietario_nome}). Valor: " . number_format($valor, 2, ',', '.') . ' MT.',
-                    'critico',
-                    'multa',
-                    $matricula
-                );
-            }
-        })->afterResponse();
+        // Guardar o texto gerado no campo observacoes (ou campo separado se preferires)
+        $auto->update(['observacoes' => $textoGerado]);
 
         return response()->json([
             'auto'  => $this->formatar($auto),
@@ -152,16 +121,19 @@ class AgenteAutoController extends Controller
         ]);
     }
 
-    public function imprimir(Request $request, int $id)
+    /**
+     * GET /api/agente/autos/{id}/pdf
+     */
+    public function pdf(Request $request, int $id)
     {
         $eu = $request->user();
         $auto = AutoNoticia::where('agente_id', $eu->id)->findOrFail($id);
 
-        $auto->update(['estado' => 'Impresso']);
-
-        return response()->json([
-            'auto' => $this->formatar($auto),
+        $pdf = Pdf::loadView('pdf.auto_noticia', [
+            'auto' => $auto,
         ]);
+
+        return $pdf->download("auto-noticia-{$auto->codigo}.pdf");
     }
 
     private function formatar(AutoNoticia $a): array
@@ -185,7 +157,6 @@ class AgenteAutoController extends Controller
     private function gerarCodigo(): string
     {
         $ano = now()->format('y');
-
         $ultimo = AutoNoticia::where('codigo', 'like', "AN-{$ano}-%")
             ->orderByDesc('id')
             ->value('codigo');

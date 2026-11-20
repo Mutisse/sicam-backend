@@ -4,8 +4,10 @@ namespace App\Http\Controllers\Api;
 
 use App\Exports\DadosExport;
 use App\Http\Controllers\Controller;
+use App\Models\Hotlist;
 use App\Models\Multa;
 use App\Models\Recibo;
+use App\Models\Veiculo;
 use Barryvdh\DomPDF\Facade\Pdf;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -55,6 +57,56 @@ class GestmulMultaController extends Controller
                     ->pluck('name'),
             ],
         ]);
+    }
+
+    /**
+     * POST /api/gestmul/multas
+     */
+    public function store(Request $request)
+    {
+        $dados = $request->validate([
+            'matricula'   => 'required|string|exists:veiculos,matricula',
+            'infracao'    => 'required|string|max:120',
+            'valor'       => 'required|numeric|min:0',
+            'provincia'   => 'required|string|max:60',
+            'posto_id'    => 'nullable|integer|exists:postos,id',
+            'observacoes' => 'nullable|string',
+        ]);
+
+        try {
+            $multa = DB::transaction(function () use ($dados) {
+                $veiculo = Veiculo::where('matricula', $dados['matricula'])->firstOrFail();
+                $ano = now()->year;
+                $ultimo = Multa::whereYear('created_at', $ano)->lockForUpdate()->count();
+                $numero = sprintf('MU-%d-%05d', $ano, $ultimo + 1);
+
+                $novaMulta = Multa::create([
+                    'numero'      => $numero,
+                    'veiculo_id'  => $veiculo->id,
+                    'agente_id'   => auth()->id(),
+                    'posto_id'    => $dados['posto_id'] ?? null,
+                    'infracao'    => $dados['infracao'],
+                    'provincia'   => $dados['provincia'],
+                    'valor'       => $dados['valor'],
+                    'estado'      => 'Pendente',
+                    'data'        => now()->toDateString(),
+                    'observacoes' => $dados['observacoes'] ?? null,
+                ]);
+
+                // LÓGICA DE NEGÓCIO: Verifica se deve entrar na Hotlist
+                $this->avaliarHotlistPorMultas($veiculo->id);
+
+                return $novaMulta;
+            });
+
+            return response()->json([
+                'id'    => (string) $multa->id,
+                'multa' => $this->formatar($multa->load(['veiculo', 'agente', 'posto'])),
+                'kpis'  => $this->kpis(),
+            ], 201);
+        } catch (\Throwable $e) {
+            return response()->json(['message' => 'Falha ao registar multa.', 'error' => $e->getMessage()], 500);
+        }
     }
 
     /**
@@ -150,20 +202,27 @@ class GestmulMultaController extends Controller
             'referencia' => 'nullable|string|max:120',
         ]);
 
-        $m->update([
-            'estado'         => 'Paga',
-            'data_pagamento' => now()->toDateString(),
-        ]);
+        DB::transaction(function () use ($m, $dados, $request) {
+            $m->update([
+                'estado'         => 'Paga',
+                'data_pagamento' => now()->toDateString(),
+            ]);
 
-        $recibo = Recibo::create([
-            'numero'     => $this->gerarNumeroRecibo(),
-            'multa_id'   => $m->id,
-            'metodo'     => $dados['metodo'],
-            'pagador'    => $dados['pagador'],
-            'referencia' => $dados['referencia'] ?? null,
-            'valor'      => $m->valor,
-            'criado_por' => $request->user()?->id,
-        ]);
+            Recibo::create([
+                'numero'     => $this->gerarNumeroRecibo(),
+                'multa_id'   => $m->id,
+                'metodo'     => $dados['metodo'],
+                'pagador'    => $dados['pagador'],
+                'referencia' => $dados['referencia'] ?? null,
+                'valor'      => $m->valor,
+                'criado_por' => $request->user()?->id,
+            ]);
+
+            // LÓGICA DE NEGÓCIO: Verifica se deve sair da Hotlist
+            $this->avaliarHotlistPorMultas($m->veiculo_id);
+        });
+
+        $recibo = Recibo::where('multa_id', $m->id)->orderByDesc('id')->first();
 
         return response()->json([
             'multa'  => $this->formatar($m->load(['veiculo', 'agente', 'posto'])),
@@ -232,6 +291,40 @@ class GestmulMultaController extends Controller
     // Helpers
     // ============================================================
 
+    private function avaliarHotlistPorMultas(int $veiculoId): void
+    {
+        $pendentes = Multa::where('veiculo_id', $veiculoId)->where('estado', 'Pendente');
+        $totalPendentes = $pendentes->count();
+        $valorPendente = $pendentes->sum('valor');
+
+        $hotlistAtiva = Hotlist::where('veiculo_id', $veiculoId)->where('estado', 'ativo')->first();
+
+        if ($totalPendentes >= 3) {
+            if ($hotlistAtiva) {
+                $hotlistAtiva->update([
+                    'multas_pendentes' => $totalPendentes,
+                    'valor_multas'     => $valorPendente,
+                ]);
+            } else {
+                Hotlist::create([
+                    'veiculo_id'       => $veiculoId,
+                    'motivo'           => 'Multas em atraso',
+                    'perigo'           => 'medio',
+                    'prioridade'       => 'media',
+                    'multas_pendentes' => $totalPendentes,
+                    'valor_multas'     => $valorPendente,
+                    'estado'           => 'ativo',
+                    'descricao'        => 'Inserido automaticamente por excesso de multas pendentes.',
+                    'detectado_em'     => now(),
+                ]);
+            }
+        } else {
+            if ($hotlistAtiva && $hotlistAtiva->motivo === 'Multas em atraso') {
+                $hotlistAtiva->update(['estado' => 'resolvido', 'resolvido_em' => now()]);
+            }
+        }
+    }
+
     private function formatar(Multa $m): array
     {
         $v = $m->veiculo;
@@ -273,9 +366,6 @@ class GestmulMultaController extends Controller
         ];
     }
 
-    /**
-     * KPIs — 1 query com SUM(CASE) em vez de 8.
-     */
     private function kpis(): array
     {
         $row = Multa::selectRaw("

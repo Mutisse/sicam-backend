@@ -10,26 +10,16 @@ use Illuminate\Http\Request;
 
 class IssmController extends Controller
 {
-    /**
-     * GET /api/dashboard/issm
-     *
-     * Dashboard global de apólices (visão ISSM).
-     * Lista limitada a 100; contagens via SUM(CASE) na BD.
-     */
     public function dashboard(Request $request)
     {
-        $hoje = Carbon::today();
-
-        // ═══════════════════════════════════════════════════════
-        // 1) Contagens agregadas — 1 query
-        // ═══════════════════════════════════════════════════════
+        // 1) Contagens agregadas por ESTADO (não por data - é mais rápido e fiável)
         $k = Apolice::selectRaw("
             COUNT(*) as total,
-            SUM(CASE WHEN estado = 'Anulada' THEN 1 ELSE 0 END) as anuladas,
-            SUM(CASE WHEN estado != 'Anulada' AND validade >= ? AND DATEDIFF(validade, ?) > 30 THEN 1 ELSE 0 END) as activas,
-            SUM(CASE WHEN estado != 'Anulada' AND validade >= ? AND DATEDIFF(validade, ?) BETWEEN 0 AND 30 THEN 1 ELSE 0 END) as a_expirar,
-            SUM(CASE WHEN estado != 'Anulada' AND validade <  ? THEN 1 ELSE 0 END) as expiradas
-        ", [$hoje, $hoje, $hoje, $hoje, $hoje])->first();
+            SUM(CASE WHEN estado = 'Activa'    THEN 1 ELSE 0 END) as activas,
+            SUM(CASE WHEN estado = 'A expirar' THEN 1 ELSE 0 END) as a_expirar,
+            SUM(CASE WHEN estado = 'Expirada'  THEN 1 ELSE 0 END) as expiradas,
+            SUM(CASE WHEN estado = 'Anulada'   THEN 1 ELSE 0 END) as anuladas
+        ")->first();
 
         $total     = (int) $k->total;
         $activas   = (int) $k->activas;
@@ -37,56 +27,31 @@ class IssmController extends Controller
         $expiradas = (int) $k->expiradas;
         $anuladas  = (int) $k->anuladas;
 
-        // ═══════════════════════════════════════════════════════
-        // 2) Sinistros — 1 query (tabela separada)
-        // ═══════════════════════════════════════════════════════
-        $sinistros = Sinistro::query()
-            ->whereIn('estado', ['Aberto', 'Em análise'])
-            ->count();
+        // 2) Sinistros
+        $sinistros = Sinistro::whereIn('estado', ['Aberto', 'Em análise'])->count();
 
-        // ═══════════════════════════════════════════════════════
-        // 3) Lista (limitada) — 1 query + eager load veículo
-        // ═══════════════════════════════════════════════════════
+        // 3) Lista
         $items = Apolice::with('veiculo:id,matricula')
             ->orderByDesc('validade')
             ->limit(100)
             ->get()
-            ->map(function ($a) use ($hoje) {
-                return [
-                    'id'         => (string) $a->id,
-                    'numero'     => $a->numero,
-                    'seguradora' => $a->seguradora,
-                    'viatura'    => $a->veiculo?->matricula ?? '—',
-                    'estado'     => $this->estadoCalculado($a, $hoje),
-                    'validade'   => $a->validade
-                        ? $a->validade->format('m/Y')
-                        : '—',
-                ];
-            });
+            ->map(fn ($a) => [
+                'id'         => (string) $a->id,
+                'numero'     => $a->numero,
+                'seguradora' => $a->seguradora,
+                'viatura'    => $a->veiculo?->matricula ?? '—',
+                'estado'     => $a->estado, // Usa diretamente o estado da BD
+                'validade'   => $a->validade ? $a->validade->format('m/Y') : '—',
+            ]);
 
-        // ═══════════════════════════════════════════════════════
-        // 4) Barras por seguradora — 1 query (GROUP BY)
-        // ═══════════════════════════════════════════════════════
-        $barras = Apolice::query()
-            ->select('seguradora')
-            ->selectRaw('COUNT(*) as total')
-            ->groupBy('seguradora')
-            ->orderByDesc('total')
-            ->get()
-            ->map(fn ($b) => [
-                'label' => $b->seguradora,
-                'valor' => (int) $b->total,
-            ])
-            ->toArray();
+        // 4) Barras por seguradora
+        $barras = Apolice::select('seguradora', \DB::raw('COUNT(*) as total'))
+            ->groupBy('seguradora')->orderByDesc('total')
+            ->get()->map(fn ($b) => ['label' => $b->seguradora, 'valor' => (int) $b->total])->toArray();
 
-        // ═══════════════════════════════════════════════════════
         // 5) Taxa de actividade
-        // ═══════════════════════════════════════════════════════
         $taxa = $total > 0 ? round(($activas / $total) * 100, 1) : 0;
 
-        // ═══════════════════════════════════════════════════════
-        // Resposta
-        // ═══════════════════════════════════════════════════════
         return response()->json([
             'titulo'   => 'Apólices registadas',
             'icon'     => 'description',
@@ -106,28 +71,5 @@ class IssmController extends Controller
             'barras'   => $barras,
             'apolices' => $items,
         ]);
-    }
-
-    /**
-     * Estado calculado (alinhado com IssmApoliceController::calcularEstado).
-     */
-    private function estadoCalculado(Apolice $a, Carbon $hoje): string
-    {
-        if ($a->estado === 'Anulada') {
-            return 'Anulada';
-        }
-        if (!$a->validade) {
-            return $a->estado ?? '—';
-        }
-
-        $dias = $hoje->diffInDays($a->validade, false);
-
-        if ($dias < 0) {
-            return 'Expirada';
-        }
-        if ($dias <= 30) {
-            return 'A expirar';
-        }
-        return 'Activa';
     }
 }

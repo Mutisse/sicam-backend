@@ -9,14 +9,9 @@ use Illuminate\Support\Facades\DB;
 
 class GestmulController extends Controller
 {
-    /**
-     * GET /api/dashboard/gestmul
-     */
     public function dashboard(Request $request)
     {
-        // ═══════════════════════════════════════════════════════
-        // 1) KPIs + valores — 1 query
-        // ═══════════════════════════════════════════════════════
+        // 1) KPIs e Valores
         $m = Multa::selectRaw("
             COUNT(*) as total,
             SUM(CASE WHEN estado = 'Paga'       THEN 1 ELSE 0 END) as pagas,
@@ -44,58 +39,34 @@ class GestmulController extends Controller
             ['key' => 'contesta',  'label' => 'Contestadas', 'valor' => $contestadas, 'total' => $total ?: 1, 'variant' => 'r'],
         ];
 
-        // ═══════════════════════════════════════════════════════
-        // 2) LINHA (7 dias) — 1 query
-        // ═══════════════════════════════════════════════════════
-        $dias       = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
+        // 2) Linha (7 dias)
+        $dias = ['Dom', 'Seg', 'Ter', 'Qua', 'Qui', 'Sex', 'Sáb'];
         $dataInicio = now()->subDays(6)->startOfDay();
-
-        $porDia = Multa::select(
-                DB::raw('DATE(data) as dia'),
-                DB::raw('COUNT(*) as total')
-            )
-            ->where('data', '>=', $dataInicio)
-            ->groupBy('dia')
-            ->pluck('total', 'dia');
+        $porDia = Multa::select(DB::raw('DATE(data) as dia'), DB::raw('COUNT(*) as total'))
+            ->where('data', '>=', $dataInicio)->groupBy('dia')->pluck('total', 'dia');
 
         $linha = [];
         for ($i = 6; $i >= 0; $i--) {
-            $dia   = now()->subDays($i);
-            $chave = $dia->toDateString();
-            $linha[] = [
-                'label' => $dias[$dia->dayOfWeek],
-                'valor' => (int) ($porDia[$chave] ?? 0),
-            ];
+            $dia = now()->subDays($i);
+            $linha[] = ['label' => $dias[$dia->dayOfWeek], 'valor' => (int) ($porDia[$dia->toDateString()] ?? 0)];
         }
 
-        // ═══════════════════════════════════════════════════════
-        // 3) BARRAS (top infracções) — 1 query
-        // ═══════════════════════════════════════════════════════
+        // 3) Barras (Top Infrações)
         $barras = Multa::select('infracao', DB::raw('COUNT(*) as total'))
-            ->groupBy('infracao')
-            ->orderByDesc('total')
-            ->get()
-            ->map(fn ($m) => [
-                'label' => $m->infracao,
-                'valor' => (int) $m->total,
-            ])
-            ->toArray();
+            ->groupBy('infracao')->orderByDesc('total')->limit(10)->get()
+            ->map(fn ($m) => ['label' => $m->infracao, 'valor' => (int) $m->total])->toArray();
 
-        // ═══════════════════════════════════════════════════════
-        // 4) Donut — 0 queries (usa valores do KPI)
-        // ═══════════════════════════════════════════════════════
+        // 4) Donut
         $donut = [
             ['label' => 'Pagas',       'valor' => $pagas,       'cor' => '#16a34a'],
             ['label' => 'Pendentes',   'valor' => $pendentes,   'cor' => '#d97706'],
             ['label' => 'Contestadas', 'valor' => $contestadas, 'cor' => '#dc2626'],
         ];
 
-        // ═══════════════════════════════════════════════════════
-        // 5) Cards — 0 queries
-        // ═══════════════════════════════════════════════════════
+        // 5) Cards
         $cards = [
             [
-                'titulo' => 'Valores (este mês)',
+                'titulo' => 'Valores Globais',
                 'linhas' => [
                     ['label' => 'Cobrado',      'valor' => number_format($valorPago,  0, ',', ' ') . ' MT'],
                     ['label' => 'Pendente',     'valor' => number_format($valorPend,  0, ',', ' ') . ' MT'],
@@ -115,27 +86,19 @@ class GestmulController extends Controller
                 'titulo' => 'Top infracções',
                 'linhas' => collect($barras)->take(3)->map(function ($b) use ($total) {
                     $percent = $total > 0 ? round(($b['valor'] / $total) * 100) : 0;
-                    return [
-                        'label' => $b['label'],
-                        'valor' => $percent . '%',
-                    ];
+                    return ['label' => $b['label'], 'valor' => $percent . '%'];
                 })->toArray(),
             ],
         ];
 
-        // ═══════════════════════════════════════════════════════
-        // 6) Tabela por província — 1 query
-        // ═══════════════════════════════════════════════════════
+        // 6) Tabela por província
         $porProvincia = Multa::select(
                 'provincia',
                 DB::raw('COUNT(*) as total'),
                 DB::raw("SUM(CASE WHEN estado = 'Paga' THEN 1 ELSE 0 END) as pagas"),
                 DB::raw("SUM(CASE WHEN estado = 'Paga' THEN valor ELSE 0 END) as cobrado")
             )
-            ->whereNotNull('provincia')
-            ->groupBy('provincia')
-            ->orderByDesc('total')
-            ->get();
+            ->whereNotNull('provincia')->groupBy('provincia')->orderByDesc('total')->get();
 
         $tabela = [
             'titulo'  => 'Por província',
@@ -157,9 +120,6 @@ class GestmulController extends Controller
             })->toArray(),
         ];
 
-        // ═══════════════════════════════════════════════════════
-        // Resposta
-        // ═══════════════════════════════════════════════════════
         return response()->json([
             'kpis'   => $kpis,
             'linha'  => $linha,

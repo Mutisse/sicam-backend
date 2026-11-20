@@ -223,13 +223,38 @@ class NotificacaoService
 
     /**
      * ═══════════════════════════════════════════════════════
+     * RESUMO COM INTELIGÊNCIA ARTIFICIAL
+     * ═══════════════════════════════════════════════════════
+     */
+    public static function resumirNotificacoesComIA(int $userId, SicamIAService $iaService): array
+    {
+        // Vai buscar as últimas 20 notificações não lidas
+        $notificacoes = Notificacao::where('user_id', $userId)
+            ->where('lida', false)
+            ->orderByDesc('created_at')
+            ->limit(20)
+            ->get()
+            ->map(fn ($n) => [
+                'tipo'     => $n->tipo,
+                'titulo'   => $n->titulo,
+                'mensagem' => $n->mensagem,
+            ])
+            ->toArray();
+
+        if (empty($notificacoes)) {
+            return ['resumo' => 'Não tens notificações novas.'];
+        }
+
+        // Chama o SicamIAService para comunicar com o Python
+        return $iaService->resumirNotificacoes($notificacoes);
+    }
+
+    /**
+     * ═══════════════════════════════════════════════════════
      * HELPERS
      * ═══════════════════════════════════════════════════════
      */
 
-    /**
-     * Devolve os IDs dos utilizadores com os perfis indicados.
-     */
     private static function utilizadoresPorPerfil(array $perfis): array
     {
         return User::whereHas('perfil', function ($q) use ($perfis) {
@@ -237,9 +262,6 @@ class NotificacaoService
         })->pluck('id')->toArray();
     }
 
-    /**
-     * Log simples para auditoria.
-     */
     private static function log(string $evento, string $referencia, int $total): void
     {
         Log::info("[Notificacao] {$evento} → {$referencia} → {$total} destinatário(s)");

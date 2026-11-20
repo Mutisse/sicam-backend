@@ -212,4 +212,71 @@ class PrmRelatorioController extends Controller
             'topMatriculas'     => $topMatriculas,
         ]);
     }
+
+    // ============================================================
+    // ⭐ IA DO RELATÓRIO
+    // ============================================================
+    public function analisarIA(Request $request)
+    {
+        $request->validate([
+            'pergunta' => 'nullable|string|max:500',
+            'de'       => 'nullable|date',
+            'ate'      => 'nullable|date',
+        ]);
+
+        try {
+            $ia = app(\App\Services\SicamIAService::class);
+
+            // Reutiliza a lógica do prm() para ter os dados agregados
+            $inicio = $request->input('de',  now()->subDays(29)->toDateString());
+            $fim    = $request->input('ate', now()->toDateString());
+
+            $relatorio = $this->prm(new Request(['de' => $inicio, 'ate' => $fim]))->getData(true);
+
+            // Dados "reais" que a IA vê (KPIs + tabelas resumidas)
+            $dadosReais = [
+                'kpis'               => $relatorio['kpis'],
+                'linha_valores'      => $relatorio['linha']['valores'],
+                'anel'               => $relatorio['anel'],
+                'hotlist_por_motivo' => $relatorio['hotlistPorMotivo'],
+                'desempenho_postos'  => $relatorio['desempenhoPorPosto'],
+                'top_matriculas'     => $relatorio['topMatriculas'],
+            ];
+
+            if (!empty($request->pergunta)) {
+                $resposta = $ia->conversar([
+                    'perfil'      => 'agente_prm',
+                    'pergunta'    => $request->pergunta,
+                    'contexto'    => [
+                        'tipo'   => 'relatorio',
+                        'de'     => $inicio,
+                        'ate'    => $fim,
+                    ],
+                    'dados_reais' => $dadosReais,
+                ]);
+            } else {
+                $resposta = $ia->analisarRelatorio([
+                    'perfil'      => 'agente_prm',
+                    'dados_reais' => $dadosReais,
+                    'contexto'    => ['de' => $inicio, 'ate' => $fim],
+                ]);
+            }
+
+            return response()->json([
+                'resposta'        => $resposta['resposta'] ?? $resposta['resumo'] ?? 'Sem resposta da IA.',
+                'sugestoes'       => $resposta['sugestoes'] ?? [
+                    'Onde há mais detenções?',
+                    'Que postos precisam de reforço?',
+                    'Resumo executivo do período',
+                ],
+                'total_analisado' => count($relatorio['desempenhoPorPosto']) + count($relatorio['topMatriculas']),
+            ]);
+        } catch (\Throwable $e) {
+            \Log::error('[PRM-REL-IA] Falha', ['erro' => $e->getMessage()]);
+            return response()->json([
+                'resposta'  => 'Não foi possível analisar o relatório agora.',
+                'sugestoes' => [],
+            ], 500);
+        }
+    }
 }

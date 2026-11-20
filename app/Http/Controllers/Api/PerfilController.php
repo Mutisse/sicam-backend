@@ -5,13 +5,23 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Services\NotificacaoService;
+use App\Services\SicamIAService; // ⭐ Importado
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Hash;
 use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\Log;
 
 class PerfilController extends Controller
 {
+    protected SicamIAService $ia;
+
+    // ⭐ Injeção de dependência
+    public function __construct(SicamIAService $ia)
+    {
+        $this->ia = $ia;
+    }
+
     // ────────────────────────────────────────────────────────
     // GET /api/perfil
     // ────────────────────────────────────────────────────────
@@ -207,12 +217,57 @@ class PerfilController extends Controller
         }
 
         $caminho = $request->file('foto')->store('avatares', 'public');
-        $url = Storage::url($caminho);
+        $url = url(Storage::url($caminho));
 
         $user->foto_url = $url;
         $user->save();
 
         return response()->json(['foto_url' => $url]);
+    }
+
+    // ────────────────────────────────────────────────────────
+    // GET /api/perfil/resumo-ia
+    // ────────────────────────────────────────────────────────
+    public function resumoIA(Request $request)
+    {
+        $user = $request->user();
+        if (!$user) {
+            return response()->json(['resumo' => 'Não autenticado.'], 401);
+        }
+
+        $consultasHoje = 0;
+        $autosHoje = 0;
+
+        try {
+            $consultasHoje = DB::table('consultas_agente')
+                ->where('agente_id', $user->id)
+                ->whereDate('consultado_em', now()->toDateString())
+                ->count();
+        } catch (\Throwable $e) {
+            Log::warning('[SICAM-IA] Erro ao contar consultas: ' . $e->getMessage());
+        }
+
+        try {
+            $autosHoje = DB::table('autos_noticia')
+                ->where('agente_id', $user->id)
+                ->whereDate('created_at', now()->toDateString())
+                ->count();
+        } catch (\Throwable $e) {
+            Log::warning('[SICAM-IA] Erro ao contar autos: ' . $e->getMessage());
+        }
+
+        $anosServico = $user->created_at ? now()->diffInYears($user->created_at) : 0;
+
+        // ⭐ Chama o SicamIAService em vez de fazer o Http::post diretamente
+        $resposta = $this->ia->resumirPerfil([
+            'agente_nome'    => $user->name,
+            'posto'          => $user->posto ?? '—',
+            'consultas_hoje' => $consultasHoje,
+            'autos_hoje'     => $autosHoje,
+            'tempo_servico'  => $anosServico,
+        ]);
+
+        return response()->json($resposta);
     }
 
     // ────────────────────────────────────────────────────────

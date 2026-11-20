@@ -1,5 +1,4 @@
 <?php
-// config/cors.php
 
 return [
     'paths' => [
@@ -7,13 +6,14 @@ return [
         'sanctum/csrf-cookie',
         'login',
         'logout',
+        'broadcasting/auth',
     ],
 
     'allowed_methods' => ['*'],
 
     'allowed_origins' => [
-        //'http://localhost:9000',
-       // 'http://127.0.0.1:9000',
+        'http://localhost:9000',
+        'http://127.0.0.1:9000',
         'https://sicam-sti.onrender.com',
     ],
 

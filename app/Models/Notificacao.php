@@ -2,12 +2,14 @@
 
 namespace App\Models;
 
+use Illuminate\Database\Eloquent\Factories\HasFactory;
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\Relations\BelongsTo;
-use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 class Notificacao extends Model
 {
+    use HasFactory;
+
     protected $table = 'notificacoes';
 
     protected $fillable = [
@@ -27,18 +29,8 @@ class Notificacao extends Model
         'lida_em' => 'datetime',
     ];
 
-    public function user(): BelongsTo
-    {
-        return $this->belongsTo(User::class);
-    }
-
     /**
-     * Cria a mesma notificação para vários utilizadores.
-     *
-     * Optimizações:
-     *  - insert em massa (1 query só, via Query Builder — ignora casts/events)
-     *  - chunks de 500 para evitar pacotes demasiado grandes (TiDB/MySQL)
-     *  - sem overhead do Eloquent (não instancia models)
+     * ⭐ Cria uma notificação para vários utilizadores de uma só vez.
      */
     public static function criarMultiplas(
         array $userIds,
@@ -48,22 +40,14 @@ class Notificacao extends Model
         ?string $categoria = null,
         ?string $referencia = null,
         ?string $url = null
-    ): int {
-        if (empty($userIds)) return 0;
+    ): void {
+        if (empty($userIds)) return;
 
-        // Remove duplicados e garante inteiros
-        $userIds = array_values(array_unique(array_map('intval', $userIds)));
-        if (empty($userIds)) return 0;
-
-        $agora  = now();
-        $total  = 0;
-        $chunks = array_chunk($userIds, 500);
-
-        foreach ($chunks as $chunk) {
-            $linhas = [];
-            foreach ($chunk as $uid) {
-                $linhas[] = [
-                    'user_id'    => $uid,
+        try {
+            $agora = now();
+            $dados = array_map(function ($userId) use ($titulo, $mensagem, $tipo, $categoria, $referencia, $url, $agora) {
+                return [
+                    'user_id'    => $userId,
                     'titulo'     => $titulo,
                     'mensagem'   => $mensagem,
                     'tipo'       => $tipo,
@@ -74,13 +58,21 @@ class Notificacao extends Model
                     'created_at' => $agora,
                     'updated_at' => $agora,
                 ];
-            }
+            }, $userIds);
 
-            // Query Builder directo — evita overhead do Eloquent
-            DB::table('notificacoes')->insert($linhas);
-            $total += count($linhas);
+            self::insert($dados);
+        } catch (\Throwable $e) {
+            Log::error('[SICAM-NOTIFICACAO] Falha ao inserir múltiplas notificações', [
+                'erro' => $e->getMessage()
+            ]);
         }
+    }
 
-        return $total;
+    /**
+     * Relação com o Utilizador
+     */
+    public function user()
+    {
+        return $this->belongsTo(User::class);
     }
 }

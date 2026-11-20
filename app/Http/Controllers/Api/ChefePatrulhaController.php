@@ -5,14 +5,21 @@ namespace App\Http\Controllers\Api;
 use App\Exports\DadosExport;
 use App\Http\Controllers\Controller;
 use App\Models\Patrulha;
+use App\Services\SicamIAService;
 use Barryvdh\DomPDF\Facade\Pdf;
 use Carbon\Carbon;
 use Illuminate\Http\Request;
-use Illuminate\Support\Facades\DB;
 use Maatwebsite\Excel\Facades\Excel;
 
 class ChefePatrulhaController extends Controller
 {
+    protected SicamIAService $ia;
+
+    public function __construct(SicamIAService $ia)
+    {
+        $this->ia = $ia;
+    }
+
     /**
      * GET /api/chefe/patrulhas
      */
@@ -47,6 +54,42 @@ class ChefePatrulhaController extends Controller
             'items' => $items,
             'kpis'  => $this->kpis(),
         ]);
+    }
+
+    /**
+     * GET /api/chefe/patrulhas/resumo-ia
+     */
+    public function resumoIA(Request $request)
+    {
+        $patrulhas = Patrulha::with('agente:id,name')->get();
+        
+        $total = $patrulhas->count();
+        $emCurso = $patrulhas->where('estado', 'Em curso')->count();
+        $planeadas = $patrulhas->where('estado', 'Planeada')->count();
+        $concluidas = $patrulhas->where('estado', 'Concluída')->count();
+        
+        $dadosPatrulhas = $patrulhas->map(function ($p) {
+            return [
+                'codigo'      => $p->codigo ?? '—',
+                'nome'        => $p->nome ?? '—',
+                'agente'      => $p->agente?->name ?? '—',
+                'estado'      => $p->estado ?? 'Planeada',
+                'prioridade'  => $p->prioridade ?? 'Média',
+                'zona'        => $p->local ?? '—',
+                'progresso'   => "{$p->pontos_concluidos}/{$p->pontos_previstos}",
+                'hora_inicio' => $p->inicio?->format('H:i') ?? '—',
+            ];
+        })->toArray();
+
+        $resposta = $this->ia->resumirPatrulhas([
+            'total'      => $total,
+            'em_curso'   => $emCurso,
+            'planeadas'  => $planeadas,
+            'concluidas' => $concluidas,
+            'patrulhas'  => $dadosPatrulhas,
+        ]);
+
+        return response()->json($resposta);
     }
 
     /**

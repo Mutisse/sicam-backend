@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Exports\DadosExport;
 use App\Http\Controllers\Controller;
+use App\Services\SicamIAService;
 use App\Models\Hotlist;
 use App\Models\Veiculo;
 use Barryvdh\DomPDF\Facade\Pdf;
@@ -26,9 +27,9 @@ class ChefeVeiculoCriticoController extends Controller
                 $sub->where('motivo', 'like', "%{$q}%")
                     ->orWhereHas('veiculo', function ($v) use ($q) {
                         $v->where('matricula', 'like', "%{$q}%")
-                          ->orWhere('marca', 'like', "%{$q}%")
-                          ->orWhere('modelo', 'like', "%{$q}%")
-                          ->orWhere('proprietario_nome', 'like', "%{$q}%");
+                            ->orWhere('marca', 'like', "%{$q}%")
+                            ->orWhere('modelo', 'like', "%{$q}%")
+                            ->orWhere('proprietario_nome', 'like', "%{$q}%");
                     });
             });
         }
@@ -42,7 +43,7 @@ class ChefeVeiculoCriticoController extends Controller
             ->orderByDesc('detectado_em')
             ->limit(300)
             ->get()
-            ->map(fn ($h) => $this->formatar($h));
+            ->map(fn($h) => $this->formatar($h));
 
         return response()->json([
             'items' => $items,
@@ -202,9 +203,20 @@ class ChefeVeiculoCriticoController extends Controller
      */
     public function abaterHotlist(int $id)
     {
-        $h = Hotlist::findOrFail($id);
-        $this->adicionarHistorico($h, 'Hotlist abatida');
-        $h->update(['estado' => 'Resolvido', 'resolvido_em' => now()]);
+        $h = Hotlist::with('veiculo')->findOrFail($id);
+
+        DB::transaction(function () use ($h) {
+            $this->adicionarHistorico($h, 'Hotlist abatida pelo Chefe de Posto');
+            $h->update(['estado' => 'resolvido', 'resolvido_em' => now()]);
+
+            // LÓGICA DE NEGÓCIO: Restaura o veículo para pendente de nova inspeção
+            if ($h->veiculo) {
+                $h->veiculo->update([
+                    'estado' => 'pendente',
+                    'score'  => 50,
+                ]);
+            }
+        });
 
         return response()->json([
             'id'      => (string) $h->id,
@@ -217,9 +229,16 @@ class ChefeVeiculoCriticoController extends Controller
      */
     public function regularizarSeguro(int $id)
     {
-        $h = Hotlist::findOrFail($id);
-        $this->adicionarHistorico($h, 'Seguro regularizado');
-        $h->update(['estado' => 'Resolvido', 'resolvido_em' => now()]);
+        $h = Hotlist::with('veiculo')->findOrFail($id);
+
+        DB::transaction(function () use ($h) {
+            $this->adicionarHistorico($h, 'Seguro regularizado');
+            $h->update(['estado' => 'resolvido', 'resolvido_em' => now()]);
+
+            if ($h->veiculo) {
+                $h->veiculo->update(['estado' => 'pendente']);
+            }
+        });
 
         return response()->json([
             'id'      => (string) $h->id,
@@ -235,9 +254,19 @@ class ChefeVeiculoCriticoController extends Controller
         $items = $this->listarParaExport($request);
 
         $cabecalhos = [
-            'Matrícula', 'Marca', 'Modelo', 'Proprietário', 'NIF',
-            'Motivo', 'Prioridade', 'Posto', 'Zona', 'Agente',
-            'Multas', 'Valor (MT)', 'Estado',
+            'Matrícula',
+            'Marca',
+            'Modelo',
+            'Proprietário',
+            'NIF',
+            'Motivo',
+            'Prioridade',
+            'Posto',
+            'Zona',
+            'Agente',
+            'Multas',
+            'Valor (MT)',
+            'Estado',
         ];
 
         $linhas = $items->map(function ($h) {
@@ -273,8 +302,13 @@ class ChefeVeiculoCriticoController extends Controller
         $items = $this->listarParaExport($request);
 
         $cabecalhos = [
-            'Matrícula', 'Marca/Modelo', 'Proprietário',
-            'Motivo', 'Prioridade', 'Posto', 'Estado',
+            'Matrícula',
+            'Marca/Modelo',
+            'Proprietário',
+            'Motivo',
+            'Prioridade',
+            'Posto',
+            'Estado',
         ];
 
         $linhas = $items->map(function ($h) {
@@ -325,7 +359,7 @@ class ChefeVeiculoCriticoController extends Controller
             'modelo'           => $v?->modelo ?? '—',
             'proprietario'     => $v?->proprietario_nome ?? '—',
             'nif'              => $v?->proprietario_numero_id ?? '—',
-            'telefone'         => '—',
+            'telefone'         => '', // ⭐ ALTERADO AQUI: Devolve vazio em vez de '—'
             'motivo'           => $h->motivo ?? 'Outro',
             'prioridade'       => $h->prioridade ?? 'Média',
             'estado'           => $this->mapearEstado($h->estado),
@@ -341,9 +375,6 @@ class ChefeVeiculoCriticoController extends Controller
         ];
     }
 
-    /**
-     * KPIs — 1 query com SUM(CASE).
-     */
     private function kpis(): array
     {
         $row = Hotlist::selectRaw("
@@ -401,5 +432,41 @@ class ChefeVeiculoCriticoController extends Controller
     {
         if (!$estado) return 'Activo';
         return $estado;
+    }
+
+    /**
+     * GET /api/chefe/veiculos-criticos/resumo-ia
+     */
+    public function resumoIA(Request $request)
+    {
+        $hotlist = Hotlist::with('veiculo')->get();
+
+        $total = $hotlist->count();
+        $hotlistCount = $hotlist->where('motivo', 'Hotlist PRM')->count();
+        $urgentes = $hotlist->where('prioridade', 'Urgente')->count();
+        $seguroExpirado = $hotlist->where('motivo', 'Seguro expirado')->count();
+
+        $dadosVeiculos = $hotlist->map(function ($h) {
+            return [
+                'matricula'   => $h->veiculo?->matricula ?? '—',
+                'marca'       => $h->veiculo?->marca ?? '—',
+                'modelo'      => $h->veiculo?->modelo ?? '—',
+                'motivo'      => $h->motivo ?? '—',
+                'prioridade'  => $h->prioridade ?? '—',
+                'estado'      => $h->estado ?? '—',
+                'posto'       => $h->posto ?? '—',
+                'multas'      => $h->multas_pendentes ?? 0,
+            ];
+        })->toArray();
+
+        $resposta = app(\App\Services\SicamIAService::class)->resumirVeiculosCriticos([
+            'total'           => $total,
+            'hotlist'         => $hotlistCount,
+            'urgentes'        => $urgentes,
+            'seguro_expirado' => $seguroExpirado,
+            'veiculos'        => $dadosVeiculos,
+        ]);
+
+        return response()->json($resposta);
     }
 }

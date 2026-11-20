@@ -10,21 +10,17 @@ return Application::configure(basePath: dirname(__DIR__))
         web: __DIR__.'/../routes/web.php',
         api: __DIR__.'/../routes/api.php',
         commands: __DIR__.'/../routes/console.php',
+        channels: __DIR__.'/../routes/channels.php',
         health: '/up',
     )
     ->withMiddleware(function (Middleware $middleware): void {
-        // Não redirecionar para route('login') — devolver 401
         $middleware->redirectGuestsTo(fn () => null);
 
-        // ⭐ statefulApi REMOVIDO — estamos a usar Bearer token, não cookies SPA
-
-        // Middleware de monitorização (medir latência de todas as requests API)
         $middleware->api(prepend: [
             \App\Http\Middleware\MonitorLatency::class,
         ]);
     })
     ->withExceptions(function (Exceptions $exceptions): void {
-        // Devolver JSON em vez de HTML para pedidos de API
         $exceptions->shouldRenderJsonWhen(function (Request $request, \Throwable $e) {
             return $request->is('api/*') || $request->expectsJson();
         });
